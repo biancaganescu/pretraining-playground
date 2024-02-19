@@ -1,3 +1,6 @@
 [submodule "lib/pythia"]
 	path = lib/pythia
 	url = git@github.com:EleutherAI/pythia.git
+[submodule "lib/svcca"]
+	path = lib/svcca
+	url = https://github.com/google/svcca.git
