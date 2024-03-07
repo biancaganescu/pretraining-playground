@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "pretraining-playground"
+version = "0.1.0"
+description = "Analysis of pre-training learning dynamics."
+authors = ["Richard Diehl Martinez <richarddiehl@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+transformers = "^4.37.1"
+torch = "^2.1.2"
+datasets = "^2.16.1"
+tqdm = "^4.66.1"
+numpy = "^1.26.3"
+huggingface-hub = "^0.20.3"
+matplotlib = "^3.8.3"
+
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
