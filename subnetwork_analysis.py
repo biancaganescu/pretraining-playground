@@ -8,6 +8,7 @@ from datasets import load_dataset
 import torch
 import re 
 import gc
+import os
 from transformers import GPTNeoXForCausalLM
 from lib.cka import gram_linear, cka
 from tqdm import tqdm
@@ -20,16 +21,23 @@ import matplotlib.pyplot as plt
 checkpoint_dataset = load_dataset("rdiehlmartinez/pythia-pile-presampled", "checkpoints", split='train', num_proc=8)
 
 ORIGINAL_BATCH_SIZE = 1024 
-REDUCED_BATCH_SIZE = 16
+REDUCED_BATCH_SIZE = 128 
 
 last_batch = checkpoint_dataset[-ORIGINAL_BATCH_SIZE:]
 
 model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
 
 # checkpoint step stored by pythia 
-checkpoint_steps = [1, 512,]
-checkpoint_steps.extend([i * 1000 for i in range(1, 144, 10)])
-checkpoint_steps.append(143000)
+
+# checkpointing steps used in evaluation by pythia 
+checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
+checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
+
+
+# OLD CHECKPOINT STEPS
+# checkpoint_steps = [1, 512,]
+# checkpoint_steps.extend([i * 1000 for i in range(1, 144, 10)])
+# checkpoint_steps.append(143000)
 
 
 class HiddenStateSaver:
@@ -187,51 +195,57 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
 for model_size in model_sizes:
     print("Running analysis for model size: ", model_size)
 
-    final_checkpoint_step = checkpoint_steps[-1]
-    final_model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
-        f"EleutherAI/pythia-{model_size}-deduped",
-        revision=f"step{final_checkpoint_step}",
-        cache_dir=f"./pythia-{model_size}-deduped/step{final_checkpoint_step}",
-    ).to('cuda').eval()
+    pickle_checkpoint_file = f"cka_analysis/cka_scores/cka_{model_size}_scores_over_checkpoint.pickle"
 
-
-    last_checkpoint_hidden_states = HiddenStateSaver(final_checkpoint_step, model_size)
-    setup_hooks(final_model_checkpoint, last_checkpoint_hidden_states, verbose=True)
-
-    forward_pass(final_model_checkpoint, last_batch, last_checkpoint_hidden_states, debug=False, verbose=True)
-
-    # Extracting layer names to compare with different model checkpoint steps
-    layer_names = list(last_checkpoint_hidden_states.checkpoint_hidden_states.keys())
-
-    cka_scores_over_checkpoint = {}
-
-    for checkpoint_step in tqdm(checkpoint_steps):
-        _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
+    if not os.path.exists(pickle_checkpoint_file):
+        final_checkpoint_step = checkpoint_steps[-1]
+        final_model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
             f"EleutherAI/pythia-{model_size}-deduped",
-            revision=f"step{checkpoint_step}",
-            cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
-            ).to('cuda').eval()
+            revision=f"step{final_checkpoint_step}",
+            cache_dir=f"./pythia-{model_size}-deduped/step{final_checkpoint_step}",
+        ).to('cuda').eval()
 
-        _hidden_state_saver = HiddenStateSaver(checkpoint_step, model_size)
-        setup_hooks(_model_checkpoint, _hidden_state_saver)
-        forward_pass(_model_checkpoint, last_batch, _hidden_state_saver, debug=False, verbose=False)
 
-        cka_scores = {}
+        last_checkpoint_hidden_states = HiddenStateSaver(final_checkpoint_step, model_size)
+        setup_hooks(final_model_checkpoint, last_checkpoint_hidden_states, verbose=True)
 
-        for layer_name in layer_names:
-            rep1 = last_checkpoint_hidden_states.checkpoint_hidden_states[layer_name].numpy()
-            rep2 = _hidden_state_saver.checkpoint_hidden_states[layer_name].numpy()
+        forward_pass(final_model_checkpoint, last_batch, last_checkpoint_hidden_states, debug=False, verbose=True)
 
-            cka_scores[layer_name] = cka(gram_linear(rep1), gram_linear(rep2))
+        # Extracting layer names to compare with different model checkpoint steps
+        layer_names = list(last_checkpoint_hidden_states.checkpoint_hidden_states.keys())
 
-        cka_scores_over_checkpoint[checkpoint_step] = cka_scores
+        cka_scores_over_checkpoint = {}
 
-        del _model_checkpoint
+        for checkpoint_step in tqdm(checkpoint_steps):
+            _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
+                f"EleutherAI/pythia-{model_size}-deduped",
+                revision=f"step{checkpoint_step}",
+                cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+                ).to('cuda').eval()
 
-    
-    # save data to picke file 
-    with open(f"cka_analysis/cka_scores/cka_{model_size}_scores_over_checkpoint.pickle", "wb") as f:
-        pickle.dump(cka_scores_over_checkpoint, f)
+            _hidden_state_saver = HiddenStateSaver(checkpoint_step, model_size)
+            setup_hooks(_model_checkpoint, _hidden_state_saver)
+            forward_pass(_model_checkpoint, last_batch, _hidden_state_saver, debug=False, verbose=False)
+
+            cka_scores = {}
+
+            for layer_name in layer_names:
+                rep1 = last_checkpoint_hidden_states.checkpoint_hidden_states[layer_name].numpy()
+                rep2 = _hidden_state_saver.checkpoint_hidden_states[layer_name].numpy()
+
+                cka_scores[layer_name] = cka(gram_linear(rep1), gram_linear(rep2))
+
+            cka_scores_over_checkpoint[checkpoint_step] = cka_scores
+
+            del _model_checkpoint
+
+        
+        # save data to picke file 
+        with open(pickle_checkpoint_file, "wb") as f:
+            pickle.dump(cka_scores_over_checkpoint, f)
+    else:
+        with open(pickle_checkpoint_file, "rb") as f:
+            cka_scores_over_checkpoint = pickle.load(f)
 
     layer_names = list(cka_scores_over_checkpoint[1].keys())
     checkpoint_steps = list(cka_scores_over_checkpoint.keys())
