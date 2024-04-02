@@ -10,20 +10,15 @@ import re
 import gc
 import os
 from transformers import GPTNeoXForCausalLM
-from lib.cka import gram_linear, cka
 from tqdm import tqdm
 import pickle
-import matplotlib.pyplot as plt
+
+import torch.nn.functional as F
 
 
 # Initial constants
 
 checkpoint_dataset = load_dataset("rdiehlmartinez/pythia-pile-presampled", "checkpoints", split='train', num_proc=8)
-
-ORIGINAL_BATCH_SIZE = 1024 
-REDUCED_BATCH_SIZE = 128 
-
-last_batch = checkpoint_dataset[-ORIGINAL_BATCH_SIZE:]
 
 model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
 
@@ -33,84 +28,150 @@ model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
 checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
 checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
 
+# attention layers to analyze
+target_layers_suffix = ["attention.query_key_value", "attention.dense", "mlp.dense_4h_to_h"]
 
-# OLD CHECKPOINT STEPS
-# checkpoint_steps = [1, 512,]
-# checkpoint_steps.extend([i * 1000 for i in range(1, 144, 10)])
-# checkpoint_steps.append(143000)
+ORIGINAL_BATCH_SIZE = 1024 
+REDUCED_BATCH_SIZE = 128 
+
+MAX_STEP = 142_999 # Last step in training (used to index final batc)
+
+# NOTE: setting up the data batch sizes 
+
+ordered_steps = list(set(checkpoint_dataset['step']))
+ordered_steps.sort()
+step_to_start_index = {step: i*1024 for i, step in enumerate(ordered_steps)}
+
+def get_data_batch(step):
+
+    assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
+    start_idx = step_to_start_index[step]
+    end_idx = start_idx + 1024
+
+    return {
+        "input_ids": torch.tensor(checkpoint_dataset[start_idx:end_idx]['ids'], device='cuda'),
+    }
 
 
-class HiddenStateSaver:
+def get_gradient_batches(step: int): 
     """
-    Class to save the hidden states of the model at a given checkpoint step. 
+    Return a generator of data batches for the valid gradient steps around the checkpoint step.
+    """
+    valid_gradient_steps = list(
+        range(max(0, step-5), min(step+6, 143_000))
+    ) 
+    return ((get_data_batch(step), step) for step in valid_gradient_steps)
+
+
+class CheckpointStateMetrics:
+    """
+    Class to save the revelant state metrics for a given checkpoint step.
     """
     def __init__(self, checkpoint_step: int, model_size: int):
         self.checkpoint_step = checkpoint_step
         self.model_size = model_size
 
-        self.checkpoint_hidden_states = {}
+        self.checkpoint_activations  = {}
+        self.checkpoint_weights = {} 
+        self.checkpoint_gradients = {}
 
     def __repr__(self):
         return f"HiddenStateSaver(checkpoint_step={self.checkpoint_step}, model_size={self.model_size})"
 
-    def get_hidden_state_hook(self, module_name,):
-        def save_hidden_states_hook(module, module_in, module_out):
+    def get_forward_hook(self, module_name,):
+        def _forward_hook(module, _module_in, module_out):
+
+            if "attention.query_key_value" in module_name:
+                hidden_states_out = module_out[..., 2*module_out.shape[-1]//3:][:, -1, :].detach().cpu()
+
+            elif "attention.dense" in module_name:
+                # Get name of the qkv module in the same layer 
+                qkv_module_name = module._global_module_name.replace("attention.dense", "attention.query_key_value")
+                previous_module_output = self.checkpoint_activations[qkv_module_name]
+
+                curr_batch_size = module_out.shape[0]
+                previous_module_output = previous_module_output[-curr_batch_size:].to('cuda')
+
+                # NOTE: need to call directly to not activate module hook 
+                hidden_states_out = F.linear(previous_module_output, module.weight, module.bias)
+
+            elif "mlp.dense_4h_to_h" in module_name:
+                hidden_states_out = module_out.detach().cpu()[:, -1, :]
+
             # check if there is already a key for the module name 
-
-            # NOTE Dimensions are (BATCH_SIZE, SEQ_LEN, HIDDEN_DIM) -- 
-            # we only care about the last hidden state as a representation of the sequence
-            module_output = module_out.detach().cpu()[:, -1, :]
-
-            if module_name not in self.checkpoint_hidden_states:
+            if module_name not in self.checkpoint_activations:
                 # if there is no key, then we create a new key and store the hidden states
-                self.checkpoint_hidden_states[module_name] = module_output
+                self.checkpoint_activations[module_name] = hidden_states_out
+
+                # extract the weight matrix just once 
+                weight_matrix = module.weight.detach().cpu()
+                self.checkpoint_weights[module_name] = weight_matrix
             else:
                 # if there is already a key, then we concatenate the new hidden states to the existing ones
-                self.checkpoint_hidden_states[module_name] = torch.cat(
-                    (self.checkpoint_hidden_states[module_name], module_output)
+                self.checkpoint_activations[module_name] = torch.cat(
+                    (self.checkpoint_activations[module_name], hidden_states_out)
                 )
         
-        return save_hidden_states_hook
+        return _forward_hook
+
+    def extract_grads(self, model, step):
+        """
+        Extract gradients from the target tensors of the model -- assumes that the model has 
+        accumulated gradients from one or more backward passes. 
+        """
+        if step not in self.checkpoint_gradients:
+            self.checkpoint_gradients[step] = {}
+        
+        for name, param in model.named_parameters():
+            # only do this for the weight matrix of the target_layers_suffix
+            if any(suff_name in name for suff_name in target_layers_suffix) and "weight" in name:
+                assert(param.grad is not None),\
+                    "Gradient is None for layer: {name} at step: {step}"
+                name = re.sub(r"\.weight", "", name)
+                self.checkpoint_gradients[step][name] = param.grad.detach().cpu() 
 
     def cleanup_hidden_states(self):
-        last_layer_name = list(self.checkpoint_hidden_states.keys())[-1]
-        last_layer = self.checkpoint_hidden_states[last_layer_name]
-        last_layer_samples = last_layer.shape[0]
+        last_layer_name = list(self.checkpoint_activations.keys())[-1]
+        last_layer_activations = self.checkpoint_activations[last_layer_name]
+        last_layer_num_samples = last_layer_activations.shape[0]
 
-        for layer_name, layer in self.checkpoint_hidden_states.items():
-            if layer.shape[0] > last_layer_samples:
-                self.checkpoint_hidden_states[layer_name] = layer[:last_layer_samples]
+        for layer_name, activations in self.checkpoint_activations.items():
+            if activations.shape[0] > last_layer_num_samples:
+                self.checkpoint_activations[layer_name] = activations[:last_layer_num_samples]
 
+    def save(self, file_name):
+        with open(file_name, "wb") as f:
+            _data = { 
+                "checkpoint_activations": self.checkpoint_activations,
+                "checkpoint_weights": self.checkpoint_weights,
+                "checkpoint_gradients": self.checkpoint_gradients,
+            }
+            pickle.dump(_data, f)
 
-
-def setup_hooks(model, hidden_state_saver, verbose=False):
+def setup_forward_hooks(model, hidden_state_saver, verbose=False):
     """
-    Function to setup hooks for the model to save the hidden states at each layer. 
+    Function to setup forward hooks for the model to save activations and weights at each layer.
     """
-    hooks = []
+    forward_hooks = []
     for name, module in model.named_modules():
         # NOTE: We are only interested in the dense layers of the attention heads
-        if re.search(r"gpt_neox\.layers\.\d+\.attention\.dense", name):
+        if any(layer in name for layer in target_layers_suffix):
             if verbose:
-                print("Registering hook for: ", name)
-            _hook = module.register_forward_hook(hidden_state_saver.get_hidden_state_hook(name,))
-            hooks.append(_hook)
-    return hooks
+                print("registering hook for: ", name)
+            _forward_hook = module.register_forward_hook(hidden_state_saver.get_forward_hook(name,))
+            forward_hooks.append(_forward_hook)
 
-def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [], debug=False, verbose=False):
+            module._global_module_name = name
+    
+    return forward_hooks 
+
+def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics, debug=False, verbose=False):
     """
     Perform a forward pass of the model on a given batch of data; assumes that the model 
     has hooks setup to save the hidden states at each layer.
-
     """
-    if not isinstance(hidden_state_savers, list):
-        hidden_state_savers = [hidden_state_savers]
-
-    model.eval()
-
     if debug:
         torch.cuda.memory._record_memory_history(max_entries=100000)
-
         # split up the last batch into smaller batches that can fit on the GPU 
         # automatically find the largest batch size that can fit on the GPU
         # and then use that to split up the last batch
@@ -118,7 +179,7 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
     batch_index = 0
 
     batch_size = 1
-    static_batch_size = None
+    static_batch_size = None # NOTE: static_batch_size is only set when batch size is reduced
 
     while batch_index < REDUCED_BATCH_SIZE:
 
@@ -130,6 +191,7 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
             if static_batch_size is None:
                 _batch_size = batch_size
             else: 
+                # NOTE: reached when we've run out of memory and have reduced the batch size
                 _batch_size = static_batch_size
 
             batch_end_index = min(batch_index + _batch_size, REDUCED_BATCH_SIZE)
@@ -138,32 +200,48 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
                 print(f"Batch index: {batch_index}, Batch end index: {batch_end_index}")
                 print(f"Batch size: {_batch_size}")
 
-            _inputs = torch.tensor(batch['ids'][batch_index : batch_end_index], device=torch.device('cuda'))
+            _inputs = batch['input_ids'][batch_index : batch_end_index]
 
+            if verbose:
+                print(f"Shape of current sub-batch inputs: {_inputs.shape}")
+
+
+            if 'labels' in batch: 
+                # NOTE: If labels are present, then we are iterating over the gradient batches 
+                _labels = batch['labels'][batch_index : batch_end_index]
+            else:
+                _labels = None 
 
             if verbose:
                 print("AFTER INPUTS")
                 print("memory: ", torch.cuda.memory_allocated()/1e9, "GB")
 
+            if _labels is None:
+                # we can throw away the outputs, we are only interested in the hidden states
+                with torch.no_grad():
+                    _ = model(_inputs)
 
-            # we can throw away the outputs, we are only interested in the hidden states
-            with torch.no_grad():
-                _ = model(_inputs)
+            else: 
+                # NOTE: we are performing the forward and backward passes to get the gradients 
+                _outputs = model(_inputs, labels=_labels)
+
+                try: 
+                    # TODO: test whether the graidnet losses are what is expected
+                    _outputs['loss'].backward()
+                except: 
+                    # NOTE - can't figure out how often we'll have an issue in the backward call 
+                    # so just exit
+                    raise Exception("Error in backward pass")
 
             if verbose:
                 print("AFTER MODEL")
                 print("memory: ", torch.cuda.memory_allocated()/1e9, "GB")
 
-            gc.collect()
-            torch.cuda.empty_cache()
-            
-            if verbose:
-                print("AFTER CUDA COLLECT ")
-                print("memory: ", torch.cuda.memory_allocated()/1e9, "GB")
+        except RuntimeError:
+            # NOTE: Exception is thrown when the batch size is too large for the GPU
 
-        except RuntimeError as e:
-
-            print("Error: ", e)
+            if batch_size == 1:
+                raise Exception("Batch size of 1 is too large for the GPU")
 
             _batch_size //= 2
             static_batch_size = _batch_size
@@ -173,8 +251,7 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
             gc.collect()
             torch.cuda.empty_cache()
 
-            for hidden_state_saver in hidden_state_savers:
-                hidden_state_saver.cleanup_hidden_states()
+            checkpoint_state_metrics.cleanup_hidden_states()
 
             continue
 
@@ -183,85 +260,71 @@ def forward_pass(model, batch, hidden_state_savers: list[HiddenStateSaver] = [],
         if static_batch_size is None:
             batch_size *= 2
 
-
     if debug:
         torch.cuda.memory._dump_snapshot("memory_snapshot_NA.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
 
 
-
 #### --- MAIN SCRIPT --- ####
 
-for model_size in model_sizes:
+# Create a directory for storing model_metrics 
+if not os.path.exists("model_metrics"):
+    os.mkdir("model_metrics")
+
+
+for model_size in tqdm(model_sizes):
     print("Running analysis for model size: ", model_size)
 
-    pickle_checkpoint_file = f"cka_analysis/cka_scores/cka_{model_size}_scores_over_checkpoint.pickle"
+    # create directory under model_metrics for the model size
+    if not os.path.exists(f"model_metrics/{model_size}"):
+        os.mkdir(f"model_metrics/{model_size}")
 
-    if not os.path.exists(pickle_checkpoint_file):
-        final_checkpoint_step = checkpoint_steps[-1]
-        final_model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
+    for checkpoint_step in tqdm(checkpoint_steps, leave=False):
+
+        # create directory for the given checkpoint 
+        if not os.path.exists(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"):
+            os.mkdir(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}")
+
+        checkpoint_file_name = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}/state_metrics.pickle"
+        if os.path.exists(checkpoint_file_name):
+            # if the checkpoint file already exists, then we skip the checkpoint
+            print(f"Checkpoint {checkpoint_step} already exists for model size {model_size}")
+            continue
+
+        _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
             f"EleutherAI/pythia-{model_size}-deduped",
-            revision=f"step{final_checkpoint_step}",
-            cache_dir=f"./pythia-{model_size}-deduped/step{final_checkpoint_step}",
-        ).to('cuda').eval()
+            revision=f"step{checkpoint_step}",
+            cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+            ).to('cuda').eval()
 
+        checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
+        forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
 
-        last_checkpoint_hidden_states = HiddenStateSaver(final_checkpoint_step, model_size)
-        setup_hooks(final_model_checkpoint, last_checkpoint_hidden_states, verbose=True)
+        data_batch = get_data_batch(MAX_STEP) # extracting activation information from the last batch
 
-        forward_pass(final_model_checkpoint, last_batch, last_checkpoint_hidden_states, debug=False, verbose=True)
+        forward_pass(_model_checkpoint, data_batch, checkpoint_state_metrics, debug=False, verbose=False)
 
-        # Extracting layer names to compare with different model checkpoint steps
-        layer_names = list(last_checkpoint_hidden_states.checkpoint_hidden_states.keys())
+        for _hook in forward_hooks:
+            # NOTE: removing the forward hook so that they don't fire during the backward 
+            # gradient computatoin 
+            _hook.remove()
 
-        cka_scores_over_checkpoint = {}
+        gradient_batches = get_gradient_batches(checkpoint_step)
 
-        for checkpoint_step in tqdm(checkpoint_steps):
-            _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
-                f"EleutherAI/pythia-{model_size}-deduped",
-                revision=f"step{checkpoint_step}",
-                cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
-                ).to('cuda').eval()
+        for _grad_batch, step in gradient_batches:
+            # Run the backward pass on the model to get the gradients 
+            _model_checkpoint.zero_grad()
 
-            _hidden_state_saver = HiddenStateSaver(checkpoint_step, model_size)
-            setup_hooks(_model_checkpoint, _hidden_state_saver)
-            forward_pass(_model_checkpoint, last_batch, _hidden_state_saver, debug=False, verbose=False)
+            grad_batch = { 
+                "labels": _grad_batch['input_ids'].clone().detach(),
+                **_grad_batch,
+            }
 
-            cka_scores = {}
+            forward_pass(_model_checkpoint, grad_batch, checkpoint_state_metrics, debug=False, verbose=False)
 
-            for layer_name in layer_names:
-                rep1 = last_checkpoint_hidden_states.checkpoint_hidden_states[layer_name].numpy()
-                rep2 = _hidden_state_saver.checkpoint_hidden_states[layer_name].numpy()
+            # extract the tensor grads 
+            checkpoint_state_metrics.extract_grads(_model_checkpoint, step)
 
-                cka_scores[layer_name] = cka(gram_linear(rep1), gram_linear(rep2))
-
-            cka_scores_over_checkpoint[checkpoint_step] = cka_scores
-
-            del _model_checkpoint
+        checkpoint_state_metrics.save(checkpoint_file_name)
 
         
-        # save data to picke file 
-        with open(pickle_checkpoint_file, "wb") as f:
-            pickle.dump(cka_scores_over_checkpoint, f)
-    else:
-        with open(pickle_checkpoint_file, "rb") as f:
-            cka_scores_over_checkpoint = pickle.load(f)
-
-    layer_names = list(cka_scores_over_checkpoint[1].keys())
-    checkpoint_steps = list(cka_scores_over_checkpoint.keys())
-
-    # flatting cka_scores_over_checkpoint into a dictionary of lists
-    cka_scores_over_checkpoint_flat = {layer_name: [] for layer_name in layer_names}
-    for checkpoint_step, cka_scores in cka_scores_over_checkpoint.items():
-        for layer_name, cka_score in cka_scores.items():
-            cka_scores_over_checkpoint_flat[layer_name].append(cka_score)
-
-    fig, ax = plt.subplots()
-    for layer_name, cka_scores in cka_scores_over_checkpoint_flat.items():
-        ax.plot(checkpoint_steps, cka_scores, label=layer_name)
-
-    ax.set_xlabel("Checkpoint Step")
-    ax.set_ylabel("CKA Score")
-    ax.set_title("CKA Score Over Time")
-    ax.legend()
-    fig.savefig(f"cka_analysis/cka_plots/cka_{model_size}_scores_over_checkpoint.png")
