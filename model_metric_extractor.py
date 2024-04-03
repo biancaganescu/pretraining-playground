@@ -1,5 +1,6 @@
 """
-Script to analyze the hidden states of the Pythia model over time using the CKA metric.
+Script to extract the hidden states, weights and grads of the Pythia model over the 
+course of training.k
 """
 
 __author__ = 'Richard Diehl Martinez'
@@ -15,12 +16,12 @@ import pickle
 
 import torch.nn.functional as F
 
-
 # Initial constants
 
 checkpoint_dataset = load_dataset("rdiehlmartinez/pythia-pile-presampled", "checkpoints", split='train', num_proc=8)
 
-model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
+# model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
+model_sizes = ["1.4b", "2.8b", "6.9b"]
 
 # checkpoint step stored by pythia 
 
@@ -43,6 +44,9 @@ ordered_steps.sort()
 step_to_start_index = {step: i*1024 for i, step in enumerate(ordered_steps)}
 
 def get_data_batch(step):
+    """
+    Get a data batch for a given step in the training process.
+    """
 
     assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
     start_idx = step_to_start_index[step]
@@ -51,7 +55,6 @@ def get_data_batch(step):
     return {
         "input_ids": torch.tensor(checkpoint_dataset[start_idx:end_idx]['ids'], device='cuda'),
     }
-
 
 def get_gradient_batches(step: int): 
     """
@@ -73,13 +76,12 @@ class CheckpointStateMetrics:
 
         self.checkpoint_activations  = {}
         self.checkpoint_weights = {} 
-        self.checkpoint_gradients = {}
 
     def __repr__(self):
         return f"HiddenStateSaver(checkpoint_step={self.checkpoint_step}, model_size={self.model_size})"
 
     def get_forward_hook(self, module_name,):
-        def _forward_hook(module, _module_in, module_out):
+        def _forward_hook(module, _, module_out):
 
             if "attention.query_key_value" in module_name:
                 hidden_states_out = module_out[..., 2*module_out.shape[-1]//3:][:, -1, :].detach().cpu()
@@ -114,21 +116,23 @@ class CheckpointStateMetrics:
         
         return _forward_hook
 
-    def extract_grads(self, model, step):
+    def extract_grads(self, model):
         """
         Extract gradients from the target tensors of the model -- assumes that the model has 
         accumulated gradients from one or more backward passes. 
         """
-        if step not in self.checkpoint_gradients:
-            self.checkpoint_gradients[step] = {}
-        
+
+        checkpoint_step_grads = {}
+       
         for name, param in model.named_parameters():
             # only do this for the weight matrix of the target_layers_suffix
             if any(suff_name in name for suff_name in target_layers_suffix) and "weight" in name:
                 assert(param.grad is not None),\
                     "Gradient is None for layer: {name} at step: {step}"
                 name = re.sub(r"\.weight", "", name)
-                self.checkpoint_gradients[step][name] = param.grad.detach().cpu() 
+                checkpoint_step_grads[name] = param.grad.detach().cpu() 
+        
+        return checkpoint_step_grads
 
     def cleanup_hidden_states(self):
         last_layer_name = list(self.checkpoint_activations.keys())[-1]
@@ -139,14 +143,9 @@ class CheckpointStateMetrics:
             if activations.shape[0] > last_layer_num_samples:
                 self.checkpoint_activations[layer_name] = activations[:last_layer_num_samples]
 
-    def save(self, file_name):
+    def save(self, file_name, data):
         with open(file_name, "wb") as f:
-            _data = { 
-                "checkpoint_activations": self.checkpoint_activations,
-                "checkpoint_weights": self.checkpoint_weights,
-                "checkpoint_gradients": self.checkpoint_gradients,
-            }
-            pickle.dump(_data, f)
+            pickle.dump(data, f)
 
 def setup_forward_hooks(model, hidden_state_saver, verbose=False):
     """
@@ -204,7 +203,6 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
 
             if verbose:
                 print(f"Shape of current sub-batch inputs: {_inputs.shape}")
-
 
             if 'labels' in batch: 
                 # NOTE: If labels are present, then we are iterating over the gradient batches 
@@ -285,33 +283,56 @@ for model_size in tqdm(model_sizes):
         if not os.path.exists(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"):
             os.mkdir(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}")
 
-        checkpoint_file_name = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}/state_metrics.pickle"
-        if os.path.exists(checkpoint_file_name):
-            # if the checkpoint file already exists, then we skip the checkpoint
-            print(f"Checkpoint {checkpoint_step} already exists for model size {model_size}")
-            continue
+        checkpoint_folder = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"
 
-        _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
-            f"EleutherAI/pythia-{model_size}-deduped",
-            revision=f"step{checkpoint_step}",
-            cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
-            ).to('cuda').eval()
+        # saving out the checkpoint weight and activations  
+        activations_file_path = os.path.join(
+            checkpoint_folder, f"checkpoint_activations.pickle"
+        )
+        weights_file_path = os.path.join(
+            checkpoint_folder, f"weights_activations.pickle"
+        )
 
-        checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
-        forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
+        if not (os.path.exists(activations_file_path) and os.path.exists(weights_file_path)):
+            _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
+                f"EleutherAI/pythia-{model_size}-deduped",
+                revision=f"step{checkpoint_step}",
+                cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+                ).to('cuda').eval()
 
-        data_batch = get_data_batch(MAX_STEP) # extracting activation information from the last batch
+            checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
+            forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
 
-        forward_pass(_model_checkpoint, data_batch, checkpoint_state_metrics, debug=False, verbose=False)
+            data_batch = get_data_batch(MAX_STEP) # extracting activation information from the last batch
 
-        for _hook in forward_hooks:
-            # NOTE: removing the forward hook so that they don't fire during the backward 
-            # gradient computatoin 
-            _hook.remove()
+            forward_pass(_model_checkpoint, data_batch, checkpoint_state_metrics, debug=False, verbose=False)
+
+            for _hook in forward_hooks:
+                # NOTE: removing the forward hook so that they don't fire during the backward 
+                # gradient computatoin 
+                _hook.remove()
+
+            checkpoint_state_metrics.save(
+                activations_file_path, checkpoint_state_metrics.checkpoint_activations
+            )
+            checkpoint_state_metrics.save(
+                weights_file_path, checkpoint_state_metrics.checkpoint_weights
+            )
+
+            # NOTE: I think this helps reduce RAM usage
+            del checkpoint_state_metrics.checkpoint_activations
+            del checkpoint_state_metrics.checkpoint_weights
 
         gradient_batches = get_gradient_batches(checkpoint_step)
 
         for _grad_batch, step in gradient_batches:
+            grad_step_file_path = os.path.join(
+                checkpoint_folder, f"checkpoint_gradients_{step}.pickle"
+            )
+ 
+            if os.path.exists(grad_step_file_path):
+                continue
+
             # Run the backward pass on the model to get the gradients 
             _model_checkpoint.zero_grad()
 
@@ -323,8 +344,10 @@ for model_size in tqdm(model_sizes):
             forward_pass(_model_checkpoint, grad_batch, checkpoint_state_metrics, debug=False, verbose=False)
 
             # extract the tensor grads 
-            checkpoint_state_metrics.extract_grads(_model_checkpoint, step)
+            grads = checkpoint_state_metrics.extract_grads(_model_checkpoint)
 
-        checkpoint_state_metrics.save(checkpoint_file_name)
+            # save the gradient state metrics
 
-        
+            checkpoint_state_metrics.save(
+                grad_step_file_path, grads
+            )
