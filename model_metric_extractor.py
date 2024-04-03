@@ -93,6 +93,7 @@ class CheckpointStateMetrics:
 
                 # NOTE: need to call directly to not activate module hook 
                 hidden_states_out = F.linear(previous_module_output, module.weight, module.bias)
+                hidden_states_out = hidden_states_out.detach().cpu()
 
             elif "mlp.dense_4h_to_h" in module_name:
                 hidden_states_out = module_out.detach().cpu()[:, -1, :]
