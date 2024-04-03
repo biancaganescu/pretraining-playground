@@ -74,9 +74,6 @@ class CheckpointStateMetrics:
         self.checkpoint_step = checkpoint_step
         self.model_size = model_size
 
-        self.checkpoint_activations  = {}
-        self.checkpoint_weights = {} 
-
     def __repr__(self):
         return f"HiddenStateSaver(checkpoint_step={self.checkpoint_step}, model_size={self.model_size})"
 
@@ -151,6 +148,10 @@ def setup_forward_hooks(model, hidden_state_saver, verbose=False):
     """
     Function to setup forward hooks for the model to save activations and weights at each layer.
     """
+
+    hidden_state_saver.checkpoint_activations = {}
+    hidden_state_saver.checkpoint_weights = {}
+
     forward_hooks = []
     for name, module in model.named_modules():
         # NOTE: We are only interested in the dense layers of the attention heads
@@ -249,7 +250,10 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
             gc.collect()
             torch.cuda.empty_cache()
 
-            checkpoint_state_metrics.cleanup_hidden_states()
+            if _labels is None:
+                # NOTE: this is kind of a hack, _labels None means we are only doing a forward pass
+                # Only in this case, we need to clean up the hidden states if we hit an OOM issue
+                checkpoint_state_metrics.cleanup_hidden_states()
 
             continue
 
@@ -271,19 +275,15 @@ if not os.path.exists("model_metrics"):
 
 
 for model_size in tqdm(model_sizes):
-    print("Running analysis for model size: ", model_size)
-
     # create directory under model_metrics for the model size
     if not os.path.exists(f"model_metrics/{model_size}"):
         os.mkdir(f"model_metrics/{model_size}")
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
-
-        # create directory for the given checkpoint 
-        if not os.path.exists(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"):
-            os.mkdir(f"model_metrics/{model_size}/checkpoint_{checkpoint_step}")
-
         checkpoint_folder = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"
+        # create directory for the given checkpoint 
+        if not os.path.exists(checkpoint_folder):
+            os.mkdir(checkpoint_folder)
 
         # saving out the checkpoint weight and activations  
         activations_file_path = os.path.join(
@@ -293,14 +293,15 @@ for model_size in tqdm(model_sizes):
             checkpoint_folder, f"weights_activations.pickle"
         )
 
-        if not (os.path.exists(activations_file_path) and os.path.exists(weights_file_path)):
-            _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
-                f"EleutherAI/pythia-{model_size}-deduped",
-                revision=f"step{checkpoint_step}",
-                cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
-                ).to('cuda').eval()
+        _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
+            f"EleutherAI/pythia-{model_size}-deduped",
+            revision=f"step{checkpoint_step}",
+            cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+            ).to('cuda')
 
-            checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
+        checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
+
+        if not (os.path.exists(activations_file_path) and os.path.exists(weights_file_path)):
             forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
 
             data_batch = get_data_batch(MAX_STEP) # extracting activation information from the last batch
