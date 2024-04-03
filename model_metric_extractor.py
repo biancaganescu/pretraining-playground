@@ -132,14 +132,26 @@ class CheckpointStateMetrics:
         
         return checkpoint_step_grads
 
-    def cleanup_hidden_states(self):
+    def cleanup_hidden_states(self, batch_index):
+        """
+        Cleans up the hidden states if we run out of memory during the forward pass. We want 
+        to ensure that the hidden states are the same size as the batch index. In practice, 
+        the activations at a given layer might be more than batch_index because at that layer
+        we did not run out of memory (only later). It's really only in the last layer that 
+        we would expect the number of samples to match the batch index.
+        """
+
         last_layer_name = list(self.checkpoint_activations.keys())[-1]
         last_layer_activations = self.checkpoint_activations[last_layer_name]
         last_layer_num_samples = last_layer_activations.shape[0]
 
+        # NOTE: this is just a simple sanity check
+        assert(last_layer_num_samples == batch_index),\
+            "The number of samples in the last layer does not match the batch index."
+
         for layer_name, activations in self.checkpoint_activations.items():
-            if activations.shape[0] > last_layer_num_samples:
-                self.checkpoint_activations[layer_name] = activations[:last_layer_num_samples]
+            if activations.shape[0] > batch_index:
+                self.checkpoint_activations[layer_name] = activations[:batch_index]
 
     def save(self, file_name, data):
         with open(file_name, "wb") as f:
@@ -254,7 +266,7 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
             if _labels is None:
                 # NOTE: this is kind of a hack, _labels None means we are only doing a forward pass
                 # Only in this case, we need to clean up the hidden states if we hit an OOM issue
-                checkpoint_state_metrics.cleanup_hidden_states()
+                checkpoint_state_metrics.cleanup_hidden_states(batch_index)
 
             continue
 
