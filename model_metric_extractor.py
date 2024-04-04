@@ -137,17 +137,8 @@ class CheckpointStateMetrics:
         Cleans up the hidden states if we run out of memory during the forward pass. We want 
         to ensure that the hidden states are the same size as the batch index. In practice, 
         the activations at a given layer might be more than batch_index because at that layer
-        we did not run out of memory (only later). It's really only in the last layer that 
-        we would expect the number of samples to match the batch index.
+        we did not run out of memory (only later). 
         """
-
-        last_layer_name = list(self.checkpoint_activations.keys())[-1]
-        last_layer_activations = self.checkpoint_activations[last_layer_name]
-        last_layer_num_samples = last_layer_activations.shape[0]
-
-        # NOTE: this is just a simple sanity check
-        assert(last_layer_num_samples == batch_index),\
-            "The number of samples in the last layer does not match the batch index."
 
         for layer_name, activations in self.checkpoint_activations.items():
             if activations.shape[0] > batch_index:
