@@ -15,6 +15,7 @@ from tqdm import tqdm
 import pickle
 import click
 from huggingface_hub import HfApi
+import shutil
 
 import multiprocessing
 
@@ -30,7 +31,6 @@ checkpoint_dataset = load_dataset(
 )
 
 model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
-model_sizes = ["1.4b", "2.8b", "6.9b"]
 
 # checkpoint step stored by pythia 
 
@@ -301,7 +301,7 @@ def main(model_size, delete_after):
         os.mkdir(model_folder)
 
     hf_api = HfApi()
-    _hf_files = hf_api.list_files("rdiehlmartinez/pythia-training-metrics", repo_type="dataset")
+    _hf_files = hf_api.list_repo_files("rdiehlmartinez/pythia-training-metrics", repo_type="dataset")
     hf_files = ["model_metrics/"+file.replace("models/", "") for file in _hf_files]
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
@@ -397,11 +397,12 @@ def main(model_size, delete_after):
         
         if delete_after:
             # delete the checkpoint folder 
-            os.rmdir(checkpoint_folder)
+            shutil.rmtree(checkpoint_folder)
+
+    if delete_after:
+        # delete the model size folder
+        shutil.rmtree(model_folder)
         
-
-
-
 
 if __name__ == "__main__":
     main()
