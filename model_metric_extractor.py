@@ -299,6 +299,10 @@ def main(model_size):
     if not os.path.exists(model_folder):
         os.mkdir(model_folder)
 
+    hf_api = HfApi()
+    _hf_files = hf_api.list_files("rdiehlmartinez/pythia-training-metrics", repo_type="dataset")
+    hf_files = ["model_metrics/"+file.replace("models/", "") for file in _hf_files]
+
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
         checkpoint_folder = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"
         # create directory for the given checkpoint 
@@ -321,7 +325,8 @@ def main(model_size):
 
         checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
 
-        if not (os.path.exists(activations_file_path) and os.path.exists(weights_file_path)):
+        if not (activations_file_path in hf_files and weights_file_path in hf_files):
+            # NOTE: these get saved out at the same time 
             forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
 
             data_batch = get_data_batch(MAX_STEP) # extracting activation information from the last batch
@@ -351,7 +356,7 @@ def main(model_size):
                 checkpoint_folder, f"checkpoint_gradients_{step}.pickle"
             )
 
-            if os.path.exists(grad_step_file_path):
+            if grad_step_file_path in hf_files:
                 continue
 
             # Run the backward pass on the model to get the gradients 
@@ -373,7 +378,6 @@ def main(model_size):
                 grad_step_file_path, grads
             )
 
-            hf_api = HfApi()
             hf_api.upload_folder(
                 folder_path=model_folder,
                 path_in_repo=f"models/{model_size}",
