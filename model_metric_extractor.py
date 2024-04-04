@@ -283,7 +283,8 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
 #### --- MAIN SCRIPT --- ####
 @click.command()
 @click.option("--model_size", help="Model size to extract metrics from", type=str)
-def main(model_size):    
+@click.option("--delete_after/--no-delete_after", default=True, help="Delete the activations and weights after saving")
+def main(model_size, delete_after):    
     """
     Extract the hidden states, weights and gradients of the Pythia model over the course of training.
     """
@@ -345,6 +346,14 @@ def main(model_size):
                 weights_file_path, checkpoint_state_metrics.checkpoint_weights
             )
 
+            hf_api.upload_folder(
+                folder_path=checkpoint_folder,
+                path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
+                repo_id="rdiehlmartinez/pythia-training-metrics",
+                repo_type="dataset",
+                allow_patterns=["checkpoint_activations.pickle", "weights_activations.pickle"]
+            )
+
             # NOTE: I think this helps reduce RAM usage
             del checkpoint_state_metrics.checkpoint_activations
             del checkpoint_state_metrics.checkpoint_weights
@@ -379,12 +388,19 @@ def main(model_size):
             )
 
             hf_api.upload_folder(
-                folder_path=model_folder,
-                path_in_repo=f"models/{model_size}",
+                folder_path=checkpoint_folder,
+                path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
                 repo_id="rdiehlmartinez/pythia-training-metrics",
                 repo_type="dataset",
-                multi_commits=True,
+                allow_patterns=[f"checkpoint_gradients_{step}.pickle"]
             )
+        
+        if delete_after:
+            # delete the checkpoint folder 
+            os.rmdir(checkpoint_folder)
+        
+
+
 
 
 if __name__ == "__main__":
