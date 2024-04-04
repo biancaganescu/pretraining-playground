@@ -1,6 +1,6 @@
 """
 Script to extract the hidden states, weights and grads of the Pythia model over the 
-course of training.k
+course of training.
 """
 
 __author__ = 'Richard Diehl Martinez'
@@ -13,14 +13,23 @@ import os
 from transformers import GPTNeoXForCausalLM
 from tqdm import tqdm
 import pickle
+import click
+from huggingface_hub import HfApi
+
+import multiprocessing
 
 import torch.nn.functional as F
 
 # Initial constants
 
-checkpoint_dataset = load_dataset("rdiehlmartinez/pythia-pile-presampled", "checkpoints", split='train', num_proc=8)
+checkpoint_dataset = load_dataset(
+    "rdiehlmartinez/pythia-pile-presampled",
+    "checkpoints",
+    split='train',
+    num_proc=multiprocessing.cpu_count()
+)
 
-# model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
+model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
 model_sizes = ["1.4b", "2.8b", "6.9b"]
 
 # checkpoint step stored by pythia 
@@ -272,16 +281,23 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
 
 
 #### --- MAIN SCRIPT --- ####
+@click.command()
+@click.option("--model_size", help="Model size to extract metrics from", type=str)
+def main(model_size):    
+    """
+    Extract the hidden states, weights and gradients of the Pythia model over the course of training.
+    """
 
-# Create a directory for storing model_metrics 
-if not os.path.exists("model_metrics"):
-    os.mkdir("model_metrics")
+    assert(model_size in model_sizes), f"Model size {model_size} not valid."
 
+    if not os.path.exists("model_metrics"):
+        os.mkdir("model_metrics")
 
-for model_size in tqdm(model_sizes):
+    model_folder = f"model_metrics/{model_size}"
+
     # create directory under model_metrics for the model size
-    if not os.path.exists(f"model_metrics/{model_size}"):
-        os.mkdir(f"model_metrics/{model_size}")
+    if not os.path.exists(model_folder):
+        os.mkdir(model_folder)
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
         checkpoint_folder = f"model_metrics/{model_size}/checkpoint_{checkpoint_step}"
@@ -334,7 +350,7 @@ for model_size in tqdm(model_sizes):
             grad_step_file_path = os.path.join(
                 checkpoint_folder, f"checkpoint_gradients_{step}.pickle"
             )
- 
+
             if os.path.exists(grad_step_file_path):
                 continue
 
@@ -356,3 +372,16 @@ for model_size in tqdm(model_sizes):
             checkpoint_state_metrics.save(
                 grad_step_file_path, grads
             )
+
+            hf_api = HfApi()
+            hf_api.upload_folder(
+                folder_path=model_folder,
+                path_in_repo=f"models/{model_size}",
+                repo_id="rdiehlmartinez/pythia-training-metrics",
+                repo_type="dataset",
+                multi_commits=True,
+            )
+
+
+if __name__ == "__main__":
+    main()
