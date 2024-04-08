@@ -315,7 +315,7 @@ def main(model_size, delete_after):
             checkpoint_folder, f"checkpoint_activations.pickle"
         )
         weights_file_path = os.path.join(
-            checkpoint_folder, f"weights_activations.pickle"
+            checkpoint_folder, f"checkpoint_weights.pickle"
         )
 
         _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
@@ -351,7 +351,7 @@ def main(model_size, delete_after):
                 path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
                 repo_id="rdiehlmartinez/pythia-training-metrics",
                 repo_type="dataset",
-                allow_patterns=["checkpoint_activations.pickle", "weights_activations.pickle"]
+                allow_patterns=["checkpoint_activations.pickle", "checkpoint_weights.pickle"]
             )
 
             # NOTE: I think this helps reduce RAM usage
