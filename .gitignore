@@ -166,3 +166,6 @@ cka_analysis/
 
 *.pickle
 *.png
+
+archive/
+model_metrics/
