@@ -1,7 +1,6 @@
 import datasets
 import pickle
 
-
 _DESCRIPTION = """\
     Dataset for storing training metrics of pythia models 
 """
@@ -12,10 +11,8 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
         "70m", 
         "160m", 
         "410m",
-        "1b",
         "1.4b",
         "2.8b",
-        "6.9b"
     ]
 
     _GRADIENTS_DESCRIPTION = """\
@@ -56,36 +53,16 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
             description=_WEIGHTS_DESCRIPTION,
             version="1.0.0",
         ),
-        datasets.BuilderConfig(
-            name="all",
-            description="All the metrics",
-            version="1.0.0",
-        )
-   ]
+  ]
 
     def _info(self):
         """
-        TODO: Got to figure out how to represent the features etc. 
-
-        how do we do this if each feature is dependent on the model size?
+        NOTE: we might want to specify features, but since the featuers are different for each
+        model size it's annoying and kind of pointless since hf does it automatically 
         """
-
-        features_dict = { 
-            "checkpoint_step": datasets.Value('int32'),
-            "layer_name": datasets.Value('string'),
-        }
-
-        if self.config.name in ["activations", "weights"]:
-            features_dict['data'] = datasets.Sequence(datasets.Value('float32'))
-        elif self.config_name in ["gradients", "gradients_mini"]:
-            features_dict['gradient_step'] = datasets.Value('int32')
-            features_dict['gradient'] = datasets.Sequence(datasets.Value('float32'))
-            
-        features = datasets.Features(features_dict)
 
         return datasets.DatasetInfo(
             description=_DESCRIPTION,
-            features=features,  
         )
 
 
@@ -112,24 +89,26 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
 
                 if self.config.name == "activations": 
                     model_size_to_fp[model_size].append(f"{directory_path}/checkpoint_activations.pickle")
-                elif self.config_name == "weights":
+                elif self.config.name == "weights":
                     model_size_to_fp[model_size].append(f"{directory_path}/checkpoint_weights.pickle")
-                elif self.config_name == "gradients":
+                elif self.config.name == "gradients":
                     for gradient_step in get_gradient_step(checkpoint_step):
                         model_size_to_fp[model_size].append(f"{directory_path}/checkpoint_gradients_{gradient_step}.pickle")
-                elif self.config_name == "gradients_mini":
+                elif self.config.name == "gradients_mini":
                     for gradient_step in get_gradient_step(checkpoint_step)[:2]:
                         model_size_to_fp[model_size].append(f"{directory_path}/checkpoint_gradients_mini_{gradient_step}.pickle")
+                else: 
+                    raise Exception("Invalid config name")
 
         downloaded_files = dl_manager.download_and_extract(model_size_to_fp)
 
         return [
             datasets.SplitGenerator(
-                name=datasets.Split.TRAIN,
+                name=model_size_name,
                 gen_kwargs={
                     "filepaths": downloaded_fps
                 }
-            )  for downloaded_fps in downloaded_files.values()
+            )  for model_size_name, downloaded_fps in downloaded_files.items()
         ]
 
     def _generate_examples(self, filepaths):
@@ -137,23 +116,22 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
         # the filepaths should be a list of filepaths 
         if isinstance(filepaths, str):
             filepaths = [filepaths]
-        
+
         global_idx = 0 # the unique identifier for the example 
 
         for filepath in filepaths:
-            with open(filepath, encoding="utf-8") as f:
+            with open(filepath, 'rb') as f:
                 data = pickle.load(f)
 
                 # extract checkpoint step from the filepath
-                checkpoint_step = int(filepath.split("/")[1].split("_")[-1])
+                checkpoint_step = int(filepath.split("/")[-2].split("_")[-1])
                 
                 if self.config.name in ["activations", "weights"]:
                     for layer_name, layer_data in data.items():
-                        for data in layer_data: 
-                            yield global_idx, {"checkpoint_step": checkpoint_step, "layer_name": layer_name, "data": data}
-                            global_idx += 1
+                        yield global_idx, {"checkpoint_step": checkpoint_step, "layer_name": layer_name, "data": layer_data}
+                        global_idx += 1
                 elif self.config.name in ["gradients", "gradients_mini"]:
+                    gradient_step = int(filepath.split('/')[-1].split("_")[-1].split(".")[0])
                     for layer_name, layer_data in data.items():
-                        for gradient_step, gradient in layer_data.items():
-                            yield global_idx, {"checkpoint_step": checkpoint_step, "layer_name": layer_name, "gradient_step": gradient_step, "gradient": gradient}
-                            global_idx += 1
+                        yield global_idx, {"checkpoint_step": checkpoint_step, "layer_name": layer_name, "gradient_step": gradient_step, "data": layer_data}
+                        global_idx += 1
