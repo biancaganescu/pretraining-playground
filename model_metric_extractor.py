@@ -387,13 +387,14 @@ def main(model_size, delete_after):
                 grad_step_file_path, grads
             )
 
-            hf_api.upload_folder(
-                folder_path=checkpoint_folder,
-                path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-                repo_id="rdiehlmartinez/pythia-training-metrics",
-                repo_type="dataset",
-                allow_patterns=[f"checkpoint_gradients_{step}.pickle"]
-            )
+        # uploading files added by grad_batch to huggingface
+        hf_api.upload_folder(
+            folder_path=checkpoint_folder,
+            path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
+            repo_id="rdiehlmartinez/pythia-training-metrics",
+            repo_type="dataset",
+            allow_patterns=[f"checkpoint_gradients_*"]
+        )
         
         if delete_after:
             # delete the checkpoint folder 
