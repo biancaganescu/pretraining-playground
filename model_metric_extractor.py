@@ -279,6 +279,18 @@ def forward_pass(model, batch, checkpoint_state_metrics: CheckpointStateMetrics,
         torch.cuda.memory._dump_snapshot("memory_snapshot_NA.pickle")
         torch.cuda.memory._record_memory_history(enabled=None)
 
+def load_model(model_size, checkpoint_step):
+    """
+    Load the model at a given checkpoint step.
+    """
+    model = GPTNeoXForCausalLM.from_pretrained(
+        f"EleutherAI/pythia-{model_size}-deduped",
+        revision=f"step{checkpoint_step}",
+        cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+    ).to('cuda')
+
+    return model
+
 
 #### --- MAIN SCRIPT --- ####
 @click.command()
@@ -318,15 +330,14 @@ def main(model_size, delete_after):
             checkpoint_folder, f"checkpoint_weights.pickle"
         )
 
-        _model_checkpoint = GPTNeoXForCausalLM.from_pretrained(
-            f"EleutherAI/pythia-{model_size}-deduped",
-            revision=f"step{checkpoint_step}",
-            cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
-            ).to('cuda')
+        _model_checkpoint = None
 
         checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
 
         if not (activations_file_path in hf_files and weights_file_path in hf_files):
+            
+            _model_checkpoint = load_model(model_size, checkpoint_step)
+
             # NOTE: these get saved out at the same time 
             forward_hooks = setup_forward_hooks(_model_checkpoint, checkpoint_state_metrics)
 
@@ -367,6 +378,9 @@ def main(model_size, delete_after):
 
             if grad_step_file_path in hf_files:
                 continue
+
+            if _model_checkpoint is None:
+                _model_checkpoint = load_model(model_size, checkpoint_step)
 
             # Run the backward pass on the model to get the gradients 
             _model_checkpoint.zero_grad()
