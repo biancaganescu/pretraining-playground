@@ -5,6 +5,8 @@ import click
 import pickle
 import os 
 
+cpu_count = os.cpu_count()
+
 checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
 checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
 
@@ -12,18 +14,18 @@ def compute_cka_sores(activation_dataset):
     """
     Computes the CKA scores of each model layer relative to the final layer's state after training
     """
-    last_batch = activation_dataset.filter(lambda record: record['checkpoint_step'] == 143_000, num_proc=8)
+    last_batch = activation_dataset.filter(lambda record: record['checkpoint_step'] == 143_000, num_proc=cpu_count)
     layer_names = last_batch['layer_name']
     cka_scores_per_layer = {layer_name: [] for layer_name in layer_names}
 
     for checkpoint_step in checkpoint_steps:
 
-        checkpoint_activations = activation_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=8)
+        checkpoint_activations = activation_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=cpu_count)
         for layer_activations in checkpoint_activations: 
             layer_name = layer_activations['layer_name']
             layer_activation = np.array(layer_activations['data'])
 
-            last_batch_activation = np.array(last_batch.filter(lambda record: record['layer_name'] == layer_name, num_proc=8)['data'][0])
+            last_batch_activation = np.array(last_batch.filter(lambda record: record['layer_name'] == layer_name, num_proc=cpu_count)['data'][0])
 
             cka_score = cka.feature_space_linear_cka(
                 layer_activation, 
@@ -44,7 +46,7 @@ def compute_weight_magnitudes(weights_dataset):
 
     for checkpoint_step in checkpoint_steps:
 
-        checkpoint_weights = weights_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=8)
+        checkpoint_weights = weights_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=cpu_count)
         for checkpoint_weight in checkpoint_weights: 
             layer_name = checkpoint_weight['layer_name']
             layer_weight = np.array(checkpoint_weight['data'])
@@ -63,10 +65,10 @@ def compute_grad_weight_magnitudes(gradient_dataset):
     grad_weight_magnitudes_per_layer = {layer_name: [] for layer_name in layer_names}
 
     for checkpoint_step in checkpoint_steps:
-        checkpoint_grads = gradient_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=8)
+        checkpoint_grads = gradient_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=cpu_count)
 
         for layer_name in layer_names:
-            layer_checkpoint_grads = checkpoint_grads.filter(lambda record: record['layer_name'] == layer_name, num_proc=8)
+            layer_checkpoint_grads = checkpoint_grads.filter(lambda record: record['layer_name'] == layer_name, num_proc=cpu_count)
             
             avg_layer_grad = None
 
@@ -96,10 +98,10 @@ def compute_grad_sim_per_layer(gradient_dataset):
     grad_sim_per_layer = {layer_name: [] for layer_name in layer_names}
 
     for checkpoint_step in checkpoint_steps:
-        checkpoint_grads = gradient_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=8)
+        checkpoint_grads = gradient_dataset.filter(lambda record: record['checkpoint_step'] == checkpoint_step, num_proc=cpu_count)
 
         for layer_name in layer_names:
-            layer_checkpoint_grads = checkpoint_grads.filter(lambda record: record['layer_name'] == layer_name, num_proc=8)
+            layer_checkpoint_grads = checkpoint_grads.filter(lambda record: record['layer_name'] == layer_name, num_proc=cpu_count)
             
             avg_cosine_sim = None
             prev_grad_data = None
