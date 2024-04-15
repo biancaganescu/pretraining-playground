@@ -4,6 +4,7 @@ from lib import cka
 import click 
 import pickle
 import os 
+import time 
 
 cpu_count = os.cpu_count()
 
@@ -131,34 +132,54 @@ def compute_grad_sim_per_layer(gradient_dataset):
     
     return grad_sim_per_layer
 
+def get_dataset(subconfig: str):
+    retry_count = 0
+    sleep_time = 10
+
+    while retry_count < 5:
+        try: 
+            dataset = load_dataset(
+                "rdiehlmartinez/pythia-training-metrics", subconfig, split='default',
+                cache_dir='/rds-d7/user/rd654/hpc-work/cache',
+            )
+            break
+        except:
+            time.sleep(sleep_time)
+            retry_count += 1
+            continue
+    else:
+        raise Exception("Failed to load dataset after 5 retries")
+
+    return dataset
+
+
 @click.command()
 @click.option('--model_size') 
 def main(model_size):
-    activation_dataset = load_dataset("rdiehlmartinez/pythia-training-metrics", f"{model_size}__activations", split='default')
-    weights_dataset = load_dataset("rdiehlmartinez/pythia-training-metrics", f"{model_size}__weights", split='default')    
-    gradient_dataset = load_dataset("rdiehlmartinez/pythia-training-metrics", f"{model_size}_gradients_mini", split='default')
 
-
-    cka_scores_per_layer = compute_cka_sores(activation_dataset)
-    weight_magnitudes_per_layer = compute_weight_magnitudes(weights_dataset)
-    grad_weight_magnitudes_per_layer = compute_grad_weight_magnitudes(gradient_dataset)
-    grad_sim_per_layer = compute_grad_sim_per_layer(gradient_dataset)
+    activation_dataset = get_dataset(f"{model_size}__activations")
+    weights_dataset = get_dataset(f"{model_size}__weights")
+    gradient_dataset = get_dataset(f"{model_size}__gradients_mini")
 
     # save out the computed metrics to compiled_satistics/model_size
     os.makedirs(f"compiled_statistics/{model_size}", exist_ok=True)
-
+ 
+    cka_scores_per_layer = compute_cka_sores(activation_dataset)
     with open(f"compiled_statistics/{model_size}/cka_scores_per_layer.pkl", "wb") as f:
         pickle.dump(cka_scores_per_layer, f)
-    
+
+    weight_magnitudes_per_layer = compute_weight_magnitudes(weights_dataset)
     with open(f"compiled_statistics/{model_size}/weight_magnitudes_per_layer.pkl", "wb") as f:
         pickle.dump(weight_magnitudes_per_layer, f)
-    
+
+    grad_weight_magnitudes_per_layer = compute_grad_weight_magnitudes(gradient_dataset)
     with open(f"compiled_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl", "wb") as f:
         pickle.dump(grad_weight_magnitudes_per_layer, f)
 
+    grad_sim_per_layer = compute_grad_sim_per_layer(gradient_dataset)
     with open(f"compiled_statistics/{model_size}/grad_sim_per_layer.pkl", "wb") as f:
         pickle.dump(grad_sim_per_layer, f)
 
-
+    
 if __name__ == '__main__':
     main()
