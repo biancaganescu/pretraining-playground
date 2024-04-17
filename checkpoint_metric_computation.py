@@ -141,6 +141,7 @@ def get_dataset(subconfig: str):
             dataset = load_dataset(
                 "rdiehlmartinez/pythia-training-metrics", subconfig, split='default',
                 cache_dir='/rds-d7/user/rd654/hpc-work/cache',
+                writer_batch_size=1000/(retry_count+1),
             )
             break
         except:
