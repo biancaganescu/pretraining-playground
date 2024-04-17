@@ -82,4 +82,4 @@ export LOGLEVEL=INFO
 cd ..
 poetry shell
 
-python model_metric_extractor.py $@
+python checkpoint_metric_extractor.py $@
