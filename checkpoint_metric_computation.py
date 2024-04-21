@@ -217,7 +217,7 @@ def get_dataset(subconfig: str):
             dataset = load_dataset(
                 "rdiehlmartinez/pythia-training-metrics", subconfig, split='default',
                 cache_dir='/rds-d7/user/rd654/hpc-work/cache',
-                writer_batch_size=1000/(retry_count+1),
+                writer_batch_size=100,
             )
             break
         except Exception as e:
@@ -243,21 +243,29 @@ def main(model_size):
     # save out the computed metrics to compiled_satistics/model_size
     os.makedirs(f"compiled_statistics/{model_size}", exist_ok=True)
  
-    cka_scores_per_layer = compute_cka_sores(activation_dataset)
-    with open(f"compiled_statistics/{model_size}/cka_scores_per_layer.pkl", "wb") as f:
-        pickle.dump(cka_scores_per_layer, f)
+    cka_scores_per_layer_fn = f"compiled_statistics/{model_size}/cka_scores_per_layer.pkl"
+    if not os.path.exists(cka_scores_per_layer_fn):
+        cka_scores_per_layer = compute_cka_sores(activation_dataset)
+        with open(cka_scores_per_layer_fn, "wb") as f:
+            pickle.dump(cka_scores_per_layer, f)
 
-    weight_magnitudes_per_layer = compute_weight_magnitudes(weights_dataset)
-    with open(f"compiled_statistics/{model_size}/weight_magnitudes_per_layer.pkl", "wb") as f:
-        pickle.dump(weight_magnitudes_per_layer, f)
+    weight_magnitudes_per_layer_fn = f"compiled_statistics/{model_size}/weight_magnitudes_per_layer.pkl"
+    if not os.path.exists(weight_magnitudes_per_layer_fn):
+        weight_magnitudes_per_layer = compute_weight_magnitudes(weights_dataset)
+        with open(weight_magnitudes_per_layer_fn, "wb") as f:
+            pickle.dump(weight_magnitudes_per_layer, f)
 
-    grad_weight_magnitudes_per_layer = compute_grad_weight_magnitudes(gradient_dataset)
-    with open(f"compiled_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl", "wb") as f:
-        pickle.dump(grad_weight_magnitudes_per_layer, f)
+    grad_weight_magnitudes_per_layer_fn = f"compiled_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl"
+    if not os.path.exists(grad_weight_magnitudes_per_layer_fn):
+        grad_weight_magnitudes_per_layer = compute_grad_weight_magnitudes(gradient_dataset)
+        with open(grad_weight_magnitudes_per_layer_fn, "wb") as f:
+            pickle.dump(grad_weight_magnitudes_per_layer, f)
 
-    grad_sim_per_layer = compute_grad_sim_per_layer(gradient_dataset)
-    with open(f"compiled_statistics/{model_size}/grad_sim_per_layer.pkl", "wb") as f:
-        pickle.dump(grad_sim_per_layer, f)
+    grad_sim_per_layer_fn = f"compiled_statistics/{model_size}/grad_sim_per_layer.pkl"
+    if not os.path.exists(grad_sim_per_layer_fn):
+        grad_sim_per_layer = compute_grad_sim_per_layer(gradient_dataset)
+        with open(grad_sim_per_layer_fn, "wb") as f:
+            pickle.dump(grad_sim_per_layer, f)
 
     
 if __name__ == '__main__':
