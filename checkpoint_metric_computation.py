@@ -1,3 +1,8 @@
+"""
+Computed metrics from the extracted information of the model weights, activations and gradients
+"""
+
+
 from datasets import load_dataset 
 import numpy as np
 from lib import cka

@@ -332,6 +332,9 @@ def main(model_size, delete_after):
 
         _model_checkpoint = None
 
+
+        # ---- Extracting Activation and Weights Information
+
         checkpoint_state_metrics = CheckpointStateMetrics(checkpoint_step, model_size)
 
         if not (activations_file_path in hf_files and weights_file_path in hf_files):
