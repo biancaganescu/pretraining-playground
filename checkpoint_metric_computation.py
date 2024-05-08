@@ -4,6 +4,7 @@ Computed metrics from the extracted information of the model weights, activation
 
 
 from datasets import load_dataset 
+from transformers import AutoConfig
 import numpy as np
 from lib import cka
 import click 
@@ -39,18 +40,64 @@ def get_checkpoint_step_to_range_indices(dataset):
 
     return checkpoint_step_to_range_indices
 
-def compute_cka_sores(activation_dataset):
+
+def compute_cka_scores(activation_dataset, weights_dataset, model_size="70m"):
     """
     Computes the CKA scores of each model layer relative to the final layer's state after training
     """
 
-    print("Computing CKA scores")
+    _model_config = AutoConfig.from_pretrained(f"EleutherAI/pythia-{model_size}-deduped")
+    num_heads = _model_config.num_attention_heads
 
-    last_checkpoint = activation_dataset.select(range(*get_checkpoint_step_to_range_indices(activation_dataset)[checkpoint_steps[-1]]))
-    layer_names = last_checkpoint['layer_name']
-    cka_scores_per_layer = {layer_name: [] for layer_name in layer_names}
+    def compute_checkpoint_ov_activation(checkpoint_activation, checkpoint_weights): 
+        """
+        Compute checkpoint-specific ov activations 
+        """
+
+        checkpoint_ov_activation = {}
+
+        # for each checkpoint we 
+        for layer_idx, i in enumerate(range(0, len(checkpoint_activation), 3)):
+            value_activation = np.array(checkpoint_activation[i]['data'])
+            output_projection = np.array(checkpoint_weights[i+1]['data']) 
+
+            assert(checkpoint_activation[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.query_key_value")
+            assert(checkpoint_weights[i+1]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.dense")
+
+            for head_idx in range(num_heads):
+
+                ov_activation_per_head = value_activation[:, head_idx*64:(head_idx+1)*64] @ output_projection[:, head_idx*64:(head_idx+1)*64].T
+                checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_activation.heads.{head_idx}"] = ov_activation_per_head
+
+            checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_activation"] = value_activation @ output_projection.T
+
+        return checkpoint_ov_activation
+
+    def get_mlp_activation(checkpoint_activation): 
+        """
+        Extracting just the MLP activations from the checkpoint activations. 
+        """
+
+        checkpoint_mlp_activation = {}
+        for layer_idx, i in enumerate(range(2, len(checkpoint_activation), 3)):
+            mlp_activation = np.array(checkpoint_activation[i]['data'])
+
+            assert(checkpoint_activation[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h")
+
+            checkpoint_mlp_activation[f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"] = mlp_activation
+        
+        return checkpoint_mlp_activation
+
 
     checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(activation_dataset)
+
+    last_checkpoint_activation = activation_dataset.select(range(*checkpoint_step_to_range_indices[checkpoint_steps[-1]]))
+    last_checkpoint_weights = weights_dataset.select(range(*checkpoint_step_to_range_indices[checkpoint_steps[-1]]))
+
+    last_checkpoint_ov_activation = compute_checkpoint_ov_activation(last_checkpoint_activation, last_checkpoint_weights)
+    last_checkpoint_mlp_activation = get_mlp_activation(last_checkpoint_activation)
+
+    cka_scores_per_activation = {layer_name: [] for layer_name in list(last_checkpoint_ov_activation.keys()) + list(last_checkpoint_mlp_activation.keys())} 
 
     for checkpoint_step in tqdm(checkpoint_steps):
 
@@ -59,22 +106,33 @@ def compute_cka_sores(activation_dataset):
         checkpoint_step_idx_range = checkpoint_step_to_range_indices[checkpoint_step]
 
         checkpoint_activations = activation_dataset.select(range(*checkpoint_step_idx_range))
-        for checkpoint_layer, last_checkpoint_layer in zip(checkpoint_activations, last_checkpoint):
-            layer_name = checkpoint_layer['layer_name']
-            assert(layer_name == last_checkpoint_layer['layer_name'])
+        checkpoint_weights = weights_dataset.select(range(*checkpoint_step_idx_range))
 
-            layer_activation = np.array(checkpoint_layer['data'])
+        checkpoint_ov_activation = compute_checkpoint_ov_activation(checkpoint_activations, checkpoint_weights)
 
-            last_batch_activation = np.array(last_checkpoint_layer['data'])
+        for layer_name, last_checkpoint_layer_activation in last_checkpoint_ov_activation.items():
+            checkpoint_layer_activation = checkpoint_ov_activation[layer_name]
 
             cka_score = cka.feature_space_linear_cka(
-                layer_activation, 
-                last_batch_activation
+                last_checkpoint_layer_activation, 
+                checkpoint_layer_activation
             )
 
-            cka_scores_per_layer[layer_name].append(cka_score)
-    
-    return cka_scores_per_layer
+            cka_scores_per_activation[layer_name].append(cka_score)
+        
+        checkpoint_mlp_activation = get_mlp_activation(checkpoint_activations)
+
+        for layer_name, last_checkpoint_layer_activation in last_checkpoint_mlp_activation.items():
+            checkpoint_layer_activation = checkpoint_mlp_activation[layer_name]
+
+            cka_score = cka.feature_space_linear_cka(
+                last_checkpoint_layer_activation, 
+                checkpoint_layer_activation
+            )
+
+            cka_scores_per_activation[layer_name].append(cka_score)
+
+    return cka_scores_per_activation
 
 def compute_weight_magnitudes(weights_dataset):
     """
@@ -317,19 +375,22 @@ def main(model_size, metrics):
     weights_dataset = None
     gradient_dataset = None
 
-    # save out the computed metrics to compiled_satistics/model_size
-    os.makedirs(f"compiled_statistics/{model_size}", exist_ok=True)
+    # save out the computed metrics to computed_satistics/model_size
+    os.makedirs(f"computed_statistics/{model_size}", exist_ok=True)
  
-    cka_scores_per_layer_fn = f"compiled_statistics/{model_size}/cka_scores_per_layer.pkl"
+    cka_scores_per_layer_fn = f"computed_statistics/{model_size}/cka_scores_per_layer.pkl"
     if not os.path.exists(cka_scores_per_layer_fn) and "cka" in metrics:
         if activation_dataset is None:
             activation_dataset = get_dataset(f"{model_size}__activations")
 
-        cka_scores_per_layer = compute_cka_sores(activation_dataset)
+        if weights_dataset is None: 
+            weights_dataset = get_dataset(f"{model_size}__weights")
+
+        cka_scores_per_layer = compute_cka_scores(activation_dataset, weights_dataset, model_size=model_size)
         with open(cka_scores_per_layer_fn, "wb") as f:
             pickle.dump(cka_scores_per_layer, f)
 
-    weight_magnitudes_per_layer_fn = f"compiled_statistics/{model_size}/weight_magnitudes_per_layer.pkl"
+    weight_magnitudes_per_layer_fn = f"computed_statistics/{model_size}/weight_magnitudes_per_layer.pkl"
     if not os.path.exists(weight_magnitudes_per_layer_fn) and "weight_magnitudes" in metrics:
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
@@ -338,7 +399,7 @@ def main(model_size, metrics):
         with open(weight_magnitudes_per_layer_fn, "wb") as f:
             pickle.dump(weight_magnitudes_per_layer, f)
 
-    grad_weight_magnitudes_per_layer_fn = f"compiled_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl"
+    grad_weight_magnitudes_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl"
     if not os.path.exists(grad_weight_magnitudes_per_layer_fn) and "grad_weight_magnitudes" in metrics:
         if gradient_dataset is None:
             gradient_dataset = get_dataset(f"{model_size}__gradients")
@@ -347,7 +408,7 @@ def main(model_size, metrics):
         with open(grad_weight_magnitudes_per_layer_fn, "wb") as f:
             pickle.dump(grad_weight_magnitudes_per_layer, f)
 
-    grad_sim_per_layer_fn = f"compiled_statistics/{model_size}/grad_sim_per_layer.pkl"
+    grad_sim_per_layer_fn = f"computed_statistics/{model_size}/grad_sim_per_layer.pkl"
     if not os.path.exists(grad_sim_per_layer_fn) and "grad_sim" in metrics:
         if gradient_dataset is None:
             gradient_dataset = get_dataset(f"{model_size}__gradients")
@@ -356,7 +417,7 @@ def main(model_size, metrics):
         with open(grad_sim_per_layer_fn, "wb") as f:
             pickle.dump(grad_sim_per_layer, f)
 
-    svd_weight_per_layer_fn = f"compiled_statistics/{model_size}/svd_weight_per_layer.pkl"
+    svd_weight_per_layer_fn = f"computed_statistics/{model_size}/svd_weight_per_layer.pkl"
     if not os.path.exists(svd_weight_per_layer_fn) and "svd_weight" in metrics:
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
