@@ -22,6 +22,32 @@ checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
 
 #### --- HELPER FUNCTIONS BEGIN --- #### 
 
+def get_dataset(subconfig: str):
+    """
+    Load the dataset from the HuggingFace Datasets library (with exponential retry if failed).
+    """
+    retry_count = 0
+    sleep_time = 10
+
+    while retry_count < 5:
+        try: 
+            dataset = load_dataset(
+                "rdiehlmartinez/pythia-training-metrics", subconfig, split='default',
+                # cache_dir='/rds-d7/user/rd654/hpc-work/cache',
+                writer_batch_size=100,
+            )
+            break
+        except Exception as e:
+            print("Failed to load dataset, retrying in 10 seconds. Exception:")
+            print(e)
+            time.sleep(sleep_time)
+            retry_count += 1
+            continue
+    else:
+        raise Exception("Failed to load dataset after 5 retries")
+
+    return dataset
+
 def setup_metric_dictionary(model_config):
     """
     For a given metric that will be computed, set up the dictionary of layer names to store 
@@ -230,17 +256,17 @@ def compute_weight_magnitudes(weights_dataset, model_config):
 
     def compute_checkpoint_mlp_weight_mag(checkpoint_weights): 
         """
-        Extracting just the MLP activations from the checkpoint activations. 
+        Extracting just the MLP weight magnitudes from the checkpoint activations. 
         """
 
         checkpoint_mlp_weight_mag = {}
 
         for layer_idx, i in enumerate(range(2, len(checkpoint_weights), 3)):
-            mlp_activation = np.array(checkpoint_weights[i]['data'])
+            mlp_projection = np.array(checkpoint_weights[i]['data'])
 
             assert(checkpoint_weights[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h")
 
-            checkpoint_mlp_weight_mag[f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"] = mlp_activation
+            checkpoint_mlp_weight_mag[f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"] = np.linalg.norm(mlp_projection)
         
         return checkpoint_mlp_weight_mag
  
@@ -588,87 +614,104 @@ def compute_grad_sim(gradient_dataset, weights_dataset, model_config):
     return grad_sim_per_layer
 
 
-def compute_svd(dataset):
+
+#### --- 
+#    COMPUTING WEIGHT SVD
+#### ---
+
+def compute_svd(weights_dataset, model_config):
     """
     For each layer, we compute the singular values.
     """
 
+    num_heads = model_config.num_attention_heads
+    attention_head_dim = model_config.hidden_size // model_config.num_attention_heads
+
+
+    def compute_checkpoint_ov_weight_svd(checkpoint_weights): 
+        """
+        Compute checkpoint-specific ov weight singular values 
+        """
+
+        checkpoint_ov_svd = {}
+
+        # for each checkpoint we 
+        for layer_idx, i in enumerate(range(0, len(checkpoint_weights), 3)):
+            qkv_projection = np.array(checkpoint_weights[i]['data']) 
+            value_projection = qkv_projection[-qkv_projection.shape[0]//3:,]
+            output_projection = np.array(checkpoint_weights[i+1]['data'])
+
+            assert(checkpoint_weights[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.query_key_value")
+            assert(checkpoint_weights[i+1]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.dense")
+
+            for head_idx in range(num_heads):
+
+                head_output_projection = output_projection[..., head_idx*attention_head_dim:(head_idx+1)*attention_head_dim]
+                head_value_projection = value_projection[head_idx*attention_head_dim:(head_idx+1)*attention_head_dim, ...]
+                head_ov_projection = head_output_projection @ head_value_projection
+
+                # performing SVD 
+
+                head_ov_singular_vals = svdvals(head_ov_projection)
+                checkpoint_ov_svd[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = head_ov_singular_vals 
+            
+            ov_singular_vals = svdvals(output_projection @ value_projection)
+            checkpoint_ov_svd[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] = ov_singular_vals
+            
+        return checkpoint_ov_svd
+
+    def compute_checkpoint_mlp_weight_svd(checkpoint_weights): 
+        """
+        Extracting just the MLP activations from the checkpoint activations. 
+        """
+
+        checkpoint_mlp_svd = {}
+
+        for layer_idx, i in enumerate(range(2, len(checkpoint_weights), 3)):
+            mlp_activation = np.array(checkpoint_weights[i]['data'])
+
+            assert(checkpoint_weights[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h")
+
+            mlp_singular_vals = svdvals(mlp_activation)
+
+            checkpoint_mlp_svd[f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"] = mlp_singular_vals
+        
+        return checkpoint_mlp_svd
+
     print("Computing SVD directions per layer")
 
-    layer_names = set(dataset['layer_name'])
-    # NOTE: we are assuming we are extracting 3 projections per layer
-    num_layers = len(layer_names)//3 
+    svd_per_layer = setup_metric_dictionary(model_config)
 
-    svd_weight_per_layer = dict()
-
-    checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(dataset)
+    checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(weights_dataset)
 
     for checkpoint_step in tqdm(checkpoint_steps):
 
         print("Processing checkpoint step: ", checkpoint_step)
 
         checkpoint_step_idx_range = checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_weights = weights_dataset.select(range(*checkpoint_step_idx_range))
 
-        checkpoint_weights = dataset.select(range(*checkpoint_step_idx_range))
+        checkpoint_ov_svd = compute_checkpoint_ov_weight_svd(checkpoint_weights)
+        checkpoint_mlp_svd = compute_checkpoint_mlp_weight_svd(checkpoint_weights)
 
-        # NOTE: Doing this because I want to be sure that we are extracting the correct matrices
-        # (since the actual filter operation is slow)
-        layer_name_to_indices = {}
-        for idx, layer_name in enumerate(checkpoint_weights['layer_name']):
-            if layer_name not in layer_name_to_indices:
-                layer_name_to_indices[layer_name] = []
-            layer_name_to_indices[layer_name].append(idx)
-        
-        # computing the OV projection 
-        for layer_num in range(num_layers):
+        for layer_name, ov_svd in checkpoint_ov_svd.items():
+            svd_per_layer[layer_name].append(ov_svd)
 
-            qkv_idx = layer_name_to_indices[f"gpt_neox.layers.{layer_num}.attention.query_key_value"]
-            output_idx = layer_name_to_indices[f"gpt_neox.layers.{layer_num}.attention.dense"]
+        for layer_name, mlp_svd in checkpoint_mlp_svd.items():
+            svd_per_layer[layer_name].append(mlp_svd)
 
-            qkv_projection = np.array(checkpoint_weights.select(qkv_idx)['data'][0])
-            value_projection = qkv_projection[-qkv_projection.shape[0]//3:,]
-            output_projection = np.array(checkpoint_weights.select(output_idx)['data'][0])
 
-            # these are the two matrices we are interested in
-            ov_projection =  output_projection @ value_projection 
-            mlp_dense = np.array(checkpoint_weights.select(layer_name_to_indices[f"gpt_neox.layers.{layer_num}.mlp.dense_4h_to_h"])['data'][0])
+        return svd_per_layer
 
-            layer_projection_matrices = dict()
-            layer_projection_matrices[f"gpt_neox.layers.{layer_num}.attention.ov_projection"] = ov_projection   
-            layer_projection_matrices[f"gpt_neox.layers.{layer_num}.mlp.dense_4h_to_h"] = mlp_dense
 
-            for layer_name, proj_matrix in layer_projection_matrices.items():
 
-                if layer_name not in svd_weight_per_layer:
-                    svd_weight_per_layer[layer_name] = []
+#### --- 
+#    COMPUTING GRAD WEIGHT SVD
+#### ---
 
-                S = svdvals(proj_matrix)
-                svd_weight_per_layer[layer_name].append(S)
 
-    return svd_weight_per_layer
 
-def get_dataset(subconfig: str):
-    retry_count = 0
-    sleep_time = 10
 
-    while retry_count < 5:
-        try: 
-            dataset = load_dataset(
-                "rdiehlmartinez/pythia-training-metrics", subconfig, split='default',
-                # cache_dir='/rds-d7/user/rd654/hpc-work/cache',
-                writer_batch_size=100,
-            )
-            break
-        except Exception as e:
-            print("Failed to load dataset, retrying in 10 seconds. Exception:")
-            print(e)
-            time.sleep(sleep_time)
-            retry_count += 1
-            continue
-    else:
-        raise Exception("Failed to load dataset after 5 retries")
-
-    return dataset
 
 
 @click.command()
@@ -745,7 +788,7 @@ def main(model_size, metrics):
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
 
-        svd_weight_per_layer = compute_svd(weights_dataset)
+        svd_weight_per_layer = compute_svd(weights_dataset, model_config)
         with open(svd_weight_per_layer_fn, "wb") as f:
             pickle.dump(svd_weight_per_layer, f) 
 
