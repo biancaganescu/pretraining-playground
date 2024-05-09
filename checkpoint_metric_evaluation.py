@@ -9,6 +9,7 @@ import torch
 import gc
 import os
 import json
+import math
 from transformers import GPTNeoXForCausalLM
 from tqdm import tqdm
 import click
@@ -196,7 +197,7 @@ def main(model_size, delete_after):
 
             evals = {
                 "loss": forward_pass(_model_checkpoint, loss_data_batch, debug=False, verbose=False),
-                "ppl": forward_pass(_model_checkpoint, ppl_data_batch, debug=False, verbose=False),
+                "ppl": math.exp(forward_pass(_model_checkpoint, ppl_data_batch, debug=False, verbose=False)),
             }
 
             with open(eval_file_path, 'w') as f:
@@ -205,7 +206,7 @@ def main(model_size, delete_after):
             hf_api.upload_folder(
                 folder_path=checkpoint_folder,
                 path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-                repo_id="rdiehlmartinez/pythia-training-metrics",
+                repo_id="rdiehlmartinez/pythia-training-evals",
                 repo_type="dataset",
             )
     
