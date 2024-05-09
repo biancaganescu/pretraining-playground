@@ -19,6 +19,30 @@ cpu_count = os.cpu_count()
 checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
 checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
 
+
+def setup_metric_dictionary(model_config):
+    """
+    For a given metric that will be computed, set up the dictionary of layer names to store 
+    the computed metric values over different checkpoints.  
+    """
+
+    layer_templates = [ 
+        "gpt_neox.layers.{layer_idx}.attention.ov_activation",
+        "gpt_neox.layers.{layer_idx}.attention.dense",
+    ]
+
+    metric_dictionary = {}
+
+    for layer_idx in range(model_config.num_hidden_layers):
+        for template in layer_templates:
+            metric_dictionary[template.format(layer_idx=layer_idx)] = []
+        
+        for head_idx in range(model_config.num_attention_heads):
+            metric_dictionary["gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}".format(layer_idx=layer_idx, head_idx=head_idx)] = []
+
+    return metric_dictionary
+
+
 def get_checkpoint_step_to_range_indices(dataset):
     """
     Get the range indices for each checkpoint step in the dataset
@@ -41,13 +65,15 @@ def get_checkpoint_step_to_range_indices(dataset):
     return checkpoint_step_to_range_indices
 
 
-def compute_cka_scores(activation_dataset, weights_dataset, model_size="70m"):
+def compute_cka_scores(activation_dataset, weights_dataset, model_config):
     """
     Computes the CKA scores of each model layer relative to the final layer's state after training
+
+    As part of the CKA scores, computes the ov activations per head.
     """
 
-    _model_config = AutoConfig.from_pretrained(f"EleutherAI/pythia-{model_size}-deduped")
-    num_heads = _model_config.num_attention_heads
+    num_heads = model_config.num_attention_heads
+    attention_head_dim = model_config.hidden_size // model_config.num_attention_heads
 
     def compute_checkpoint_ov_activation(checkpoint_activation, checkpoint_weights): 
         """
@@ -66,10 +92,10 @@ def compute_cka_scores(activation_dataset, weights_dataset, model_size="70m"):
 
             for head_idx in range(num_heads):
 
-                ov_activation_per_head = value_activation[:, head_idx*64:(head_idx+1)*64] @ output_projection[:, head_idx*64:(head_idx+1)*64].T
-                checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_activation.heads.{head_idx}"] = ov_activation_per_head
+                ov_activation_per_head = value_activation[:, head_idx*attention_head_dim:(head_idx+1)*attention_head_dim] @ output_projection[:, head_idx*attention_head_dim:(head_idx+1)*attention_head_dim].T
+                checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = ov_activation_per_head
 
-            checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_activation"] = value_activation @ output_projection.T
+            checkpoint_ov_activation[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] = value_activation @ output_projection.T
 
         return checkpoint_ov_activation
 
@@ -97,7 +123,7 @@ def compute_cka_scores(activation_dataset, weights_dataset, model_size="70m"):
     last_checkpoint_ov_activation = compute_checkpoint_ov_activation(last_checkpoint_activation, last_checkpoint_weights)
     last_checkpoint_mlp_activation = get_mlp_activation(last_checkpoint_activation)
 
-    cka_scores_per_activation = {layer_name: [] for layer_name in list(last_checkpoint_ov_activation.keys()) + list(last_checkpoint_mlp_activation.keys())} 
+    cka_scores_per_activation = setup_metric_dictionary(model_config)
 
     for checkpoint_step in tqdm(checkpoint_steps):
 
@@ -134,15 +160,61 @@ def compute_cka_scores(activation_dataset, weights_dataset, model_size="70m"):
 
     return cka_scores_per_activation
 
-def compute_weight_magnitudes(weights_dataset):
+def compute_weight_magnitudes(weights_dataset, model_config):
     """
     Computes the magnitude of the weights in each layer of the model at the different timesteps.
     """
 
+    num_heads = model_config.num_attention_heads
+    attention_head_dim = model_config.hidden_size // model_config.num_attention_heads
+
+    def compute_checkpoint_ov_weight_mag(checkpoint_weights): 
+        """
+        Compute checkpoint-specific ov weight magnitudes
+        """
+
+        checkpoint_ov_weight_mag = {}
+
+        # for each checkpoint we 
+        for layer_idx, i in enumerate(range(0, len(checkpoint_weights), 3)):
+            qkv_projection = np.array(checkpoint_weights[i]['data']) 
+            value_projection = qkv_projection[-qkv_projection.shape[0]//3:,]
+            output_projection = np.array(checkpoint_weights[i+1]['data'])
+
+            assert(checkpoint_weights[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.query_key_value")
+            assert(checkpoint_weights[i+1]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.dense")
+
+            for head_idx in range(num_heads):
+
+                head_output_projection = output_projection[..., head_idx*attention_head_dim:(head_idx+1)*attention_head_dim]
+                head_value_projection = value_projection[head_idx*attention_head_dim:(head_idx+1)*attention_head_dim, ...]
+                head_ov_projection = head_output_projection @ head_value_projection
+                checkpoint_ov_weight_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = np.linalg.norm(head_ov_projection)
+
+            checkpoint_ov_weight_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = np.linalg.norm(value_projection @ output_projection.T)
+            
+        return checkpoint_ov_weight_mag
+
+    def compute_checkpoint_mlp_weight_mag(checkpoint_weights): 
+        """
+        Extracting just the MLP activations from the checkpoint activations. 
+        """
+
+        checkpoint_mlp_weight_mag = {}
+
+        for layer_idx, i in enumerate(range(2, len(checkpoint_weights), 3)):
+            mlp_activation = np.array(checkpoint_weights[i]['data'])
+
+            assert(checkpoint_weights[i]['layer_name'] == f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h")
+
+            checkpoint_mlp_weight_mag[f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"] = mlp_activation) 
+        
+        return checkpoint_mlp_weight_mag
+ 
+
     print("Computing weight magnitudes")
 
-    layer_names = set(weights_dataset['layer_name'])
-    weight_magnitudes_per_layer = {layer_name: [] for layer_name in layer_names}
+    weight_magnitudes_per_layer = setup_metric_dictionary(model_config)
 
     checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(weights_dataset)
 
@@ -150,15 +222,16 @@ def compute_weight_magnitudes(weights_dataset):
 
         print("Processing checkpoint step: ", checkpoint_step)
         checkpoint_step_idx_range = checkpoint_step_to_range_indices[checkpoint_step]
-
         checkpoint_weights = weights_dataset.select(range(*checkpoint_step_idx_range))
-        for checkpoint_weight in checkpoint_weights: 
-            layer_name = checkpoint_weight['layer_name']
-            layer_weight = np.array(checkpoint_weight['data'])
+        
+        ov_weight_mag = compute_checkpoint_ov_weight_mag(checkpoint_weights)
+        mlp_weight_mag = compute_checkpoint_mlp_weight_mag(checkpoint_weights)
 
-            layer_weight_magnitude = np.linalg.norm(layer_weight)
+        for layer_name, ov_weight_mag in ov_weight_mag.items():
+            weight_magnitudes_per_layer[layer_name].append(ov_weight_mag)
 
-            weight_magnitudes_per_layer[layer_name].append(layer_weight_magnitude)
+        for layer_name, mlp_weight_mag in mlp_weight_mag.items():
+            weight_magnitudes_per_layer[layer_name].append(mlp_weight_mag)
 
     return weight_magnitudes_per_layer
 
@@ -377,6 +450,8 @@ def main(model_size, metrics):
 
     # save out the computed metrics to computed_satistics/model_size
     os.makedirs(f"computed_statistics/{model_size}", exist_ok=True)
+
+    model_config = AutoConfig.from_pretrained(f"EleutherAI/pythia-{model_size}-deduped")
  
     cka_scores_per_layer_fn = f"computed_statistics/{model_size}/cka_scores_per_layer.pkl"
     if not os.path.exists(cka_scores_per_layer_fn) and "cka" in metrics:
@@ -386,7 +461,7 @@ def main(model_size, metrics):
         if weights_dataset is None: 
             weights_dataset = get_dataset(f"{model_size}__weights")
 
-        cka_scores_per_layer = compute_cka_scores(activation_dataset, weights_dataset, model_size=model_size)
+        cka_scores_per_layer = compute_cka_scores(activation_dataset, weights_dataset, model_config)
         with open(cka_scores_per_layer_fn, "wb") as f:
             pickle.dump(cka_scores_per_layer, f)
 
