@@ -55,8 +55,8 @@ def setup_metric_dictionary(model_config):
     """
 
     layer_templates = [ 
-        "gpt_neox.layers.{layer_idx}.attention.ov_activation",
-        "gpt_neox.layers.{layer_idx}.attention.dense",
+        "gpt_neox.layers.{layer_idx}.attention.ov_circuit",
+        "gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h",
     ]
 
     metric_dictionary = {}
@@ -167,6 +167,8 @@ def compute_cka_scores(activation_dataset, weights_dataset, model_config):
         
         return checkpoint_mlp_activation
 
+
+    print("Computing CKA scores")
 
     checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(activation_dataset)
 
@@ -376,7 +378,7 @@ def compute_grad_weight_magnitudes(gradient_dataset, weights_dataset, model_conf
                     avg_layer_grad_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] += ov_weight_mag
                 
             for layer_name, avg_grad in avg_layer_grad_mag.items():
-                checkpoint_ov_grad_weight_mag[layer_name].append(avg_grad/len(qkv_grad_indices))
+                checkpoint_ov_grad_weight_mag[layer_name] = avg_grad/len(qkv_grad_indices)
         
         return checkpoint_ov_grad_weight_mag
 
@@ -407,7 +409,7 @@ def compute_grad_weight_magnitudes(gradient_dataset, weights_dataset, model_conf
                 else:
                     avg_mlp_grad += mlp_weight_mag
                 
-            checkpoint_mlp_weight_mag[mlp_projection_name].append(avg_mlp_grad/len(mlp_indices))
+            checkpoint_mlp_weight_mag[mlp_projection_name] = avg_mlp_grad/len(mlp_indices)
         
         return checkpoint_mlp_weight_mag
 
@@ -425,8 +427,8 @@ def compute_grad_weight_magnitudes(gradient_dataset, weights_dataset, model_conf
         grad_checkpoint_step_idx_range = grad_checkpoint_step_to_range_indices[checkpoint_step]
         checkpoint_grads = gradient_dataset.select(range(*grad_checkpoint_step_idx_range))
 
-        weight_checkpoint_step_to_range_indices = weight_checkpoint_step_to_range_indices[checkpoint_step]
-        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range_indices))
+        weight_checkpoint_step_to_range = weight_checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range))
         
         checkpoint_ov_weight_mags = compute_checkpoint_ov_grad_weight_mag(checkpoint_grads, checkpoint_weights)
         checkpoint_mlp_weight_mags = compute_checkpoint_mlp_grad_weight_mag(checkpoint_grads)
@@ -539,8 +541,8 @@ def compute_grad_sim(gradient_dataset, weights_dataset, model_config):
 
                 prev_ov_grad_dict[ov_circuit_name] = ov_grad
                     
-            for layer_name, avg_grad in avg_cosine_sim_dict.items():
-                checkpoint_ov_grad_sim[layer_name].append(avg_grad/(len(qkv_grad_indices)-1))
+            for layer_name, avg_cosine_sim in avg_cosine_sim_dict.items():
+                checkpoint_ov_grad_sim[layer_name] = avg_cosine_sim/(len(qkv_grad_indices)-1)
         
         return checkpoint_ov_grad_sim
 
@@ -581,12 +583,12 @@ def compute_grad_sim(gradient_dataset, weights_dataset, model_config):
 
                 prev_mlp_grad = mlp_grad
                 
-            checkpoint_mlp_grad_sim[mlp_projection_name].append(avg_cosine_sim/(len(mlp_indices)-1))
+            checkpoint_mlp_grad_sim[mlp_projection_name] = avg_cosine_sim/(len(mlp_indices)-1)
         
         return checkpoint_mlp_grad_sim
 
 
-    print("Computing grad sim")
+    print("Computing grad similarity")
 
     grad_sim_per_layer = setup_metric_dictionary(model_config)
 
@@ -599,8 +601,8 @@ def compute_grad_sim(gradient_dataset, weights_dataset, model_config):
         grad_checkpoint_step_idx_range = grad_checkpoint_step_to_range_indices[checkpoint_step]
         checkpoint_grads = gradient_dataset.select(range(*grad_checkpoint_step_idx_range))
 
-        weight_checkpoint_step_to_range_indices = weight_checkpoint_step_to_range_indices[checkpoint_step]
-        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range_indices))
+        weight_checkpoint_step_to_range = weight_checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range))
         
         checkpoint_ov_grad_sims = compute_checkpoint_ov_grad_sim(checkpoint_grads, checkpoint_weights)
         checkpoint_mlp_grad_sims = compute_checkpoint_mlp_grad_sim(checkpoint_grads)
@@ -614,7 +616,6 @@ def compute_grad_sim(gradient_dataset, weights_dataset, model_config):
     return grad_sim_per_layer
 
 
-
 #### --- 
 #    COMPUTING WEIGHT SVD
 #### ---
@@ -626,7 +627,6 @@ def compute_svd(weights_dataset, model_config):
 
     num_heads = model_config.num_attention_heads
     attention_head_dim = model_config.hidden_size // model_config.num_attention_heads
-
 
     def compute_checkpoint_ov_weight_svd(checkpoint_weights): 
         """
@@ -679,7 +679,7 @@ def compute_svd(weights_dataset, model_config):
         
         return checkpoint_mlp_svd
 
-    print("Computing SVD directions per layer")
+    print("Computing weight singular values")
 
     svd_per_layer = setup_metric_dictionary(model_config)
 
@@ -701,8 +701,7 @@ def compute_svd(weights_dataset, model_config):
         for layer_name, mlp_svd in checkpoint_mlp_svd.items():
             svd_per_layer[layer_name].append(mlp_svd)
 
-
-        return svd_per_layer
+    return svd_per_layer
 
 
 #### --- 
@@ -786,7 +785,7 @@ def compute_grad_svd(gradient_dataset, weights_dataset, model_config):
                     avg_layer_grad_svd[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] += ov_svd
                 
             for layer_name, avg_grad in avg_layer_grad_svd.items():
-                checkpoint_ov_grad_svd[layer_name].append(avg_grad/len(qkv_grad_indices))
+                checkpoint_ov_grad_svd[layer_name] = avg_grad/len(qkv_grad_indices)
         
         return checkpoint_ov_grad_svd
 
@@ -817,12 +816,12 @@ def compute_grad_svd(gradient_dataset, weights_dataset, model_config):
                 else:
                     avg_mlp_grad += mlp_weight_mag
                 
-            checkpoint_mlp_grad_svd[mlp_projection_name].append(avg_mlp_grad/len(mlp_indices))
+            checkpoint_mlp_grad_svd[mlp_projection_name] = avg_mlp_grad/len(mlp_indices)
         
         return checkpoint_mlp_grad_svd
 
 
-    print("Computing grad weight magnitudes")
+    print("Computing gradient singular values")
 
     grad_svd_per_layer = setup_metric_dictionary(model_config)
 
@@ -835,8 +834,8 @@ def compute_grad_svd(gradient_dataset, weights_dataset, model_config):
         grad_checkpoint_step_idx_range = grad_checkpoint_step_to_range_indices[checkpoint_step]
         checkpoint_grads = gradient_dataset.select(range(*grad_checkpoint_step_idx_range))
 
-        weight_checkpoint_step_to_range_indices = weight_checkpoint_step_to_range_indices[checkpoint_step]
-        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range_indices))
+        weight_checkpoint_step_to_range = weight_checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range))
         
         checkpoint_ov_grad_svd = compute_checkpoint_ov_grad_svd(checkpoint_grads, checkpoint_weights)
         checkpoint_mlp_grad_svd = compute_checkpoint_mlp_grad_svd(checkpoint_grads)
@@ -861,7 +860,10 @@ def compute_grad_svd(gradient_dataset, weights_dataset, model_config):
         "weight_svd", 
         "grad_weight_svd"
     ])
-def main(model_size, metrics):
+@click.option(
+    '--use_mini_grads/--use_full_grads', default=True
+)
+def main(model_size, metrics, use_mini_grads):
 
     activation_dataset = None
     weights_dataset = None
@@ -896,7 +898,7 @@ def main(model_size, metrics):
     grad_weight_magnitudes_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl"
     if not os.path.exists(grad_weight_magnitudes_per_layer_fn) and "grad_weight_magnitudes" in metrics:
         if gradient_dataset is None:
-            gradient_dataset = get_dataset(f"{model_size}__gradients")
+            gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))
             
         if weights_dataset is None: 
             weights_dataset = get_dataset(f"{model_size}__weights")
@@ -908,11 +910,10 @@ def main(model_size, metrics):
     grad_sim_per_layer_fn = f"computed_statistics/{model_size}/grad_sim_per_layer.pkl"
     if not os.path.exists(grad_sim_per_layer_fn) and "grad_sim" in metrics:
         if gradient_dataset is None:
-            gradient_dataset = get_dataset(f"{model_size}__gradients")
+            gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))
 
         if weights_dataset is None: 
             weights_dataset = get_dataset(f"{model_size}__weights")
-
 
         grad_sim_per_layer = compute_grad_sim(gradient_dataset, weights_dataset, model_config)
         with open(grad_sim_per_layer_fn, "wb") as f:
@@ -920,7 +921,6 @@ def main(model_size, metrics):
 
     weight_svd_per_layer_fn = f"computed_statistics/{model_size}/weight_svd_per_layer.pkl"
     if not os.path.exists(weight_svd_per_layer_fn) and "weight_svd" in metrics:
-           
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
 
@@ -931,7 +931,7 @@ def main(model_size, metrics):
     grad_weight_svd_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_svd_per_layer.pkl"
     if not os.path.exists(grad_weight_svd_per_layer_fn) and "grad_weight_svd" in metrics:
         if gradient_dataset is None:
-            gradient_dataset = get_dataset(f"{model_size}__gradients")
+            gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))
 
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
