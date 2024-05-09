@@ -630,7 +630,8 @@ def compute_svd(weights_dataset, model_config):
 
     def compute_checkpoint_ov_weight_svd(checkpoint_weights): 
         """
-        Compute checkpoint-specific ov weight singular values 
+        Compute checkpoint-specific ov weight singular values; includes performing the computation
+        per head. 
         """
 
         checkpoint_ov_svd = {}
@@ -662,7 +663,7 @@ def compute_svd(weights_dataset, model_config):
 
     def compute_checkpoint_mlp_weight_svd(checkpoint_weights): 
         """
-        Extracting just the MLP activations from the checkpoint activations. 
+        Computes checkpoint-specific mlp singular values.
         """
 
         checkpoint_mlp_svd = {}
@@ -704,15 +705,149 @@ def compute_svd(weights_dataset, model_config):
         return svd_per_layer
 
 
-
 #### --- 
 #    COMPUTING GRAD WEIGHT SVD
 #### ---
 
+def compute_grad_svd(gradient_dataset, weights_dataset, model_config):
+    """
+    Computes the svd of the gradients in each layer of the model at the different timesteps.
+    For the OV circuit, we compute the weight svd of the OV activations per head.
+    """
+    num_heads = model_config.num_attention_heads
+    attention_head_dim = model_config.hidden_size // model_config.num_attention_heads 
+
+    def compute_checkpoint_ov_grad_svd(checkpoint_grads, checkpoint_weights): 
+        """
+        Compute checkpoint-specific ov grad singular values; includes performing the computation
+        per head. 
+        """
+
+        checkpoint_ov_grad_svd = {}
+
+        # NOTE: if we call the function below with weights_dataset we should get the same results
+        grad_layer_name_to_indices = get_layer_name_to_checkpoint_idx(checkpoint_grads)
+        weight_layer_name_to_indices = get_layer_name_to_checkpoint_idx(checkpoint_weights)
+
+        for layer_idx in range(model_config.num_hidden_layers):
+            qkv_projection_name =  f"gpt_neox.layers.{layer_idx}.attention.query_key_value"
+            output_projection_name = f"gpt_neox.layers.{layer_idx}.attention.dense"
+
+            qkv_grad_indices = grad_layer_name_to_indices[qkv_projection_name]
+            output_grad_indices = grad_layer_name_to_indices[output_projection_name]
+
+            # NOTE: we only have 1 weight matrix, so we can just use the first index
+            qkv_projection_idx = weight_layer_name_to_indices[qkv_projection_name][0]
+            output_projection_idx = weight_layer_name_to_indices[output_projection_name][0]
+
+            qkv_projection = np.array(checkpoint_weights[qkv_projection_idx]['data']) 
+            value_projection = qkv_projection[-qkv_projection.shape[0]//3:,]
+            output_projection = np.array(checkpoint_weights[output_projection_idx]['data'])
+
+            assert(checkpoint_weights[qkv_projection_idx]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.query_key_value")
+            assert(checkpoint_weights[output_projection_idx]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.dense")
+
+            avg_layer_grad_svd = {}
+
+            for qkv_idx, output_idx in zip(qkv_grad_indices, output_grad_indices):
+
+                qkv_grad = np.array(checkpoint_grads[qkv_idx]['data']) 
+                value_grad = qkv_grad[-qkv_grad.shape[0]//3:,]
+                output_grad = np.array(checkpoint_grads[output_idx]['data'])
+
+                assert(checkpoint_grads[qkv_idx]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.query_key_value")
+                assert(checkpoint_grads[output_idx]['layer_name'] == f"gpt_neox.layers.{layer_idx}.attention.dense")
+
+                for head_idx in range(num_heads):
+
+                    head_output_grad = output_grad[..., head_idx*attention_head_dim:(head_idx+1)*attention_head_dim]
+                    head_value_grad = value_grad[head_idx*attention_head_dim:(head_idx+1)*attention_head_dim, ...]
+
+                    head_output_projection = output_projection[..., head_idx*attention_head_dim:(head_idx+1)*attention_head_dim]
+                    head_value_projection = value_projection[head_idx*attention_head_dim:(head_idx+1)*attention_head_dim, ...]
+
+                    head_ov_grad = head_output_grad @ head_value_projection + head_output_projection @ head_value_grad
+
+                    _head_svd = svdvals(head_ov_grad)
+
+                    head_ov_key_name = f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"
+
+                    if head_ov_key_name not in avg_layer_grad_svd:
+                        avg_layer_grad_svd[head_ov_key_name] = _head_svd
+                    else: 
+                        avg_layer_grad_svd[head_ov_key_name] += _head_svd
+                
+                # computing the OV weight magnitude
+                ov_svd = svdvals(output_grad @ value_projection + output_projection @ value_grad)
+                    
+                if f"gpt_neox.layers.{layer_idx}.attention.ov_circuit" not in avg_layer_grad_svd:
+                    avg_layer_grad_svd[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] = ov_svd
+                else:
+                    avg_layer_grad_svd[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] += ov_svd
+                
+            for layer_name, avg_grad in avg_layer_grad_svd.items():
+                checkpoint_ov_grad_svd[layer_name].append(avg_grad/len(qkv_grad_indices))
+        
+        return checkpoint_ov_grad_svd
 
 
+    def compute_checkpoint_mlp_grad_svd(checkpoint_grads): 
+        """
+        Compute checkpoint-specific mlp grad svd. 
+        """
+
+        checkpoint_mlp_grad_svd = {}
+
+        layer_name_to_indices = get_layer_name_to_checkpoint_idx(checkpoint_grads)
+
+        for layer_idx in range(model_config.num_hidden_layers):
+
+            mlp_projection_name = f"gpt_neox.layers.{layer_idx}.mlp.dense_4h_to_h"
+
+            mlp_indices = layer_name_to_indices[mlp_projection_name]
+
+            avg_mlp_grad = None
+
+            for mlp_idx in mlp_indices:
+                mlp_grad = np.array(checkpoint_grads[mlp_idx]['data']) 
+                mlp_weight_mag = svdvals(mlp_grad)
+
+                if avg_mlp_grad is None:
+                    avg_mlp_grad = mlp_weight_mag
+                else:
+                    avg_mlp_grad += mlp_weight_mag
+                
+            checkpoint_mlp_grad_svd[mlp_projection_name].append(avg_mlp_grad/len(mlp_indices))
+        
+        return checkpoint_mlp_grad_svd
 
 
+    print("Computing grad weight magnitudes")
+
+    grad_svd_per_layer = setup_metric_dictionary(model_config)
+
+    grad_checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(gradient_dataset)
+    weight_checkpoint_step_to_range_indices = get_checkpoint_step_to_range_indices(weights_dataset)
+
+    for checkpoint_step in tqdm(checkpoint_steps):
+
+        print("Processing checkpoint step: ", checkpoint_step)
+        grad_checkpoint_step_idx_range = grad_checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_grads = gradient_dataset.select(range(*grad_checkpoint_step_idx_range))
+
+        weight_checkpoint_step_to_range_indices = weight_checkpoint_step_to_range_indices[checkpoint_step]
+        checkpoint_weights = weights_dataset.select(range(*weight_checkpoint_step_to_range_indices))
+        
+        checkpoint_ov_grad_svd = compute_checkpoint_ov_grad_svd(checkpoint_grads, checkpoint_weights)
+        checkpoint_mlp_grad_svd = compute_checkpoint_mlp_grad_svd(checkpoint_grads)
+
+        for layer_name, ov_grad_svd in checkpoint_ov_grad_svd.items():
+            grad_svd_per_layer[layer_name].append(ov_grad_svd)
+
+        for layer_name, mlp_grad_svd in checkpoint_mlp_grad_svd.items():
+            grad_svd_per_layer[layer_name].append(mlp_grad_svd)
+
+    return grad_svd_per_layer
 
 @click.command()
 @click.argument('model_size') 
@@ -723,8 +858,8 @@ def compute_svd(weights_dataset, model_config):
         "weight_magnitudes", 
         "grad_weight_magnitudes", 
         "grad_sim",
-        "svd_weight", 
-        "svd_grad_weight"
+        "weight_svd", 
+        "grad_weight_svd"
     ])
 def main(model_size, metrics):
 
@@ -783,15 +918,28 @@ def main(model_size, metrics):
         with open(grad_sim_per_layer_fn, "wb") as f:
             pickle.dump(grad_sim_per_layer, f)
 
-    svd_weight_per_layer_fn = f"computed_statistics/{model_size}/svd_weight_per_layer.pkl"
-    if not os.path.exists(svd_weight_per_layer_fn) and "svd_weight" in metrics:
+    weight_svd_per_layer_fn = f"computed_statistics/{model_size}/weight_svd_per_layer.pkl"
+    if not os.path.exists(weight_svd_per_layer_fn) and "weight_svd" in metrics:
+           
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
 
-        svd_weight_per_layer = compute_svd(weights_dataset, model_config)
-        with open(svd_weight_per_layer_fn, "wb") as f:
-            pickle.dump(svd_weight_per_layer, f) 
+        svd_per_layer = compute_svd(weights_dataset, model_config)
+        with open(weight_svd_per_layer_fn, "wb") as f:
+            pickle.dump(svd_per_layer, f) 
 
-    
+    grad_weight_svd_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_svd_per_layer.pkl"
+    if not os.path.exists(grad_weight_svd_per_layer_fn) and "grad_weight_svd" in metrics:
+        if gradient_dataset is None:
+            gradient_dataset = get_dataset(f"{model_size}__gradients")
+
+        if weights_dataset is None:
+            weights_dataset = get_dataset(f"{model_size}__weights")
+
+        grad_svd_per_layer = compute_grad_svd(gradient_dataset, weights_dataset, model_config)
+        with open(grad_weight_svd_per_layer_fn, "wb") as f:
+            pickle.dump(grad_svd_per_layer, f) 
+
+
 if __name__ == '__main__':
     main()
