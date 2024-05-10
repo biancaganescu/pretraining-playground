@@ -51,6 +51,8 @@ def get_data_batch(step, include_labels=True):
     Get a data batch for a given step in the training process.
     """
 
+    step = min(step, MAX_STEP)
+
     assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
     start_idx = step_to_start_index[step]
     end_idx = start_idx + 1024
