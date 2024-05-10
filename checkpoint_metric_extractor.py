@@ -419,7 +419,7 @@ def main(model_size, delete_after):
 
     if delete_after:
         # delete the model size folder
-        shutil.rmtree(model_folder)
+        shutil.rmtree("model_metrics")
         
 
 if __name__ == "__main__":

@@ -162,7 +162,7 @@ def load_model(model_size, checkpoint_step):
 #### --- MAIN SCRIPT --- ####
 @click.command()
 @click.option("--model_size", help="Model size to extract metrics from", type=str)
-@click.option("--delete_after/--no-delete_after", default=True, help="Delete the activations and weights after saving")
+@click.option("--delete_after/--no-delete_after", default=True, help="Delete the computed evals after uploading")
 def main(model_size, delete_after):    
     """
     Extract the hidden states, weights and gradients of the Pythia model over the course of training.
@@ -214,7 +214,7 @@ def main(model_size, delete_after):
     
     if delete_after:
         # delete the model size folder
-        shutil.rmtree(model_folder)
+        shutil.rmtree("training_evals")
         
 if __name__ == "__main__":
     main()
