@@ -4,7 +4,7 @@ Helper utility for the analysis of the evaluation results.
 
 import json
 import os 
-
+import pickle
 
 # Basic constants for evaluation  
 ALL_EVAL_METRICS = ['arc_challenge', 'arc_easy', 'lambada_openai', 'piqa', 'winogrande', 'wsc', 'sciq', 'logiqa',]
@@ -56,8 +56,32 @@ def get_checkpoint_evals(model_size, eval_metrics=LIMITED_EVAL_METRICS):
     return checkpoint_evals
 
 
-
-def sort_and_filter_metrics(metrics, filter_layer_name="attention.dense",):
+def sort_and_filter_metrics(metrics, filter_layer_name="attention.dense", remove_heads=False):
+    """
+    Given a dictionary of metrics, filters out the metrics by the filter_layer_name key and 
+    possibly removed heads even if they share the 
+    """
     metrics = {key: val for key, val in metrics.items() if filter_layer_name in key} 
+    if remove_heads: 
+        metrics = {key: val for key, val in metrics.items() if "heads" not in key}
     metrics = {key: val for key, val in sorted(metrics.items(), key=lambda x: int(x[0].split("layers.")[-1].split('.')[0]))}
     return metrics
+
+
+def basic_data_sanity_check():
+    """
+    Simple sanity checks to verify the integrity of computed_metrics
+    """
+    for metric_name in METRICS: 
+        for model_size in MODEL_SIZES: 
+            # we want to compute the average metric for each of the model sizes and plot out 
+            # the average metric as a function of the number of training steps
+            try: 
+                with open(f'/home/rd654/pretraining-playground/computed_statistics/{model_size}/{metric_name}_per_layer.pkl', 'rb') as f:
+                    _metrics = pickle.load(f)
+                
+                for key, value in _metrics.items(): 
+                    if value is None or len(value) == 0:
+                        print(f"No data for  -- Model Size: {model_size} - Metric: {metric_name} - Layer Name: {key}")
+            except:
+                print(f"Could not open file for -- Model Size: {model_size} - Metric: {metric_name}")
