@@ -1,9 +1,0 @@
-[submodule "lib/pythia"]
-	ignore = untracked
-	path = lib/pythia
-	url = git@github.com:EleutherAI/pythia.git
-[submodule "lib/svcca"]
-	# dirty 
-	ignore = untracked
-	path = lib/svcca
-	url = https://github.com/google/svcca.git
