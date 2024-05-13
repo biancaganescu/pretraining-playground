@@ -252,7 +252,7 @@ def compute_weight_magnitudes(weights_dataset, model_config):
                 head_ov_projection = head_output_projection @ head_value_projection
                 checkpoint_ov_weight_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = np.linalg.norm(head_ov_projection)
 
-            checkpoint_ov_weight_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit.heads.{head_idx}"] = np.linalg.norm(output_projection @ value_projection)
+            checkpoint_ov_weight_mag[f"gpt_neox.layers.{layer_idx}.attention.ov_circuit"] = np.linalg.norm(output_projection @ value_projection)
             
         return checkpoint_ov_weight_mag
 
