@@ -7,3 +7,6 @@
 	ignore = untracked
 	path = lib/svcca
 	url = https://github.com/google/svcca.git
+[submodule "pythia"]
+	path = pythia
+	url = https://github.com/EleutherAI/pythia.git
