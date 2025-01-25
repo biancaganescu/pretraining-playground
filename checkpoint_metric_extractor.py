@@ -3,7 +3,7 @@ Script to extract the hidden states, weights and grads of the Pythia model over 
 course of training.
 """
 
-__author__ = 'Richard Diehl Martinez'
+
 
 from datasets import load_dataset
 import torch
@@ -24,33 +24,33 @@ import torch.nn.functional as F
 # Initial constants
 
 checkpoint_dataset = load_dataset(
-    "rdiehlmartinez/pythia-pile-presampled",
-    "checkpoints",
+    "biancaganescu/training-data-per-batch",
+    "default",
     split='train',
     num_proc=multiprocessing.cpu_count()
 )
 
-model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b", "6.9b"]
+model_sizes = ["14m"]
 
 # checkpoint step stored by pythia 
 
 # checkpointing steps used in evaluation by pythia 
-checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
-checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
+checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 3000, 4000, 4091]
+# checkpoint_steps.extend([(i * 10000) for i in range(0, 15)])
 
 # attention layers to analyze
 target_layers_suffix = ["attention.query_key_value", "attention.dense", "mlp.dense_4h_to_h"]
 
-ORIGINAL_BATCH_SIZE = 1024 
-REDUCED_BATCH_SIZE = 128 
+ORIGINAL_BATCH_SIZE = 32 
+REDUCED_BATCH_SIZE = 32 
 
-MAX_STEP = 142_999 # Last step in training (used to index final batc)
+MAX_STEP = 4090 # Last step in training (used to index final batc)
 
 # NOTE: setting up the data batch sizes 
 
 ordered_steps = list(set(checkpoint_dataset['step']))
 ordered_steps.sort()
-step_to_start_index = {step: i*1024 for i, step in enumerate(ordered_steps)}
+step_to_start_index = {step: i*32 for i, step in enumerate(ordered_steps)}
 
 def get_data_batch(step):
     """
@@ -59,7 +59,7 @@ def get_data_batch(step):
 
     assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
     start_idx = step_to_start_index[step]
-    end_idx = start_idx + 1024
+    end_idx = start_idx + 32
 
     return {
         "input_ids": torch.tensor(checkpoint_dataset[start_idx:end_idx]['ids'], device='cuda'),
@@ -70,7 +70,7 @@ def get_gradient_batches(step: int):
     Return a generator of data batches for the valid gradient steps around the checkpoint step.
     """
     valid_gradient_steps = list(
-        range(max(0, step-5), min(step+6, 143_000))
+        range(max(0, step-5), min(step+6, 4091))
     ) 
     return ((get_data_batch(step), step) for step in valid_gradient_steps)
 
@@ -284,9 +284,7 @@ def load_model(model_size, checkpoint_step):
     Load the model at a given checkpoint step.
     """
     model = GPTNeoXForCausalLM.from_pretrained(
-        f"EleutherAI/pythia-{model_size}-deduped",
-        revision=f"step{checkpoint_step}",
-        cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+        f"../gpt-neox/hf-checkpoints-{model_size}/step{checkpoint_step}"
     ).to('cuda')
 
     return model
@@ -313,7 +311,7 @@ def main(model_size, delete_after):
         os.mkdir(model_folder)
 
     hf_api = HfApi()
-    _hf_files = hf_api.list_repo_files("rdiehlmartinez/pythia-training-metrics", repo_type="dataset")
+    _hf_files = hf_api.list_repo_files("biancaganescu/pythia-training-metrics", repo_type="dataset")
     hf_files = ["model_metrics/"+file.replace("models/", "") for file in _hf_files]
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
@@ -363,7 +361,7 @@ def main(model_size, delete_after):
             hf_api.upload_folder(
                 folder_path=checkpoint_folder,
                 path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-                repo_id="rdiehlmartinez/pythia-training-metrics",
+                repo_id="biancaganescu/pythia-training-metrics",
                 repo_type="dataset",
                 allow_patterns=["checkpoint_activations.pickle", "checkpoint_weights.pickle"]
             )
@@ -408,7 +406,7 @@ def main(model_size, delete_after):
         hf_api.upload_folder(
             folder_path=checkpoint_folder,
             path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-            repo_id="rdiehlmartinez/pythia-training-metrics",
+            repo_id="biancaganescu/pythia-training-metrics",
             repo_type="dataset",
             allow_patterns=[f"checkpoint_gradients_*"]
         )
