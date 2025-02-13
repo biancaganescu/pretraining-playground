@@ -4,15 +4,13 @@ import pickle
 _DESCRIPTION = """\
     Dataset for storing training metrics of pythia models 
 """
+LAST_STEP = 4091
 
 class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
     
+
     MODEL_SIZES = [ 
-        "70m", 
-        "160m", 
-        "410m",
-        "1.4b",
-        #"2.8b",
+        "14m"
     ]
 
     _GRADIENTS_DESCRIPTION = """\
@@ -69,6 +67,7 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
 
 
     def _split_generators(self, dl_manager: datasets.DownloadManager):
+        global LAST_STEP
         """ 
         Returns data for different splits - we define a split as a model size. 
         """
@@ -78,14 +77,15 @@ class PythiaTrainingMetrics(datasets.GeneratorBasedBuilder):
         kwargs_checkpoint_steps = []
         kwargs_gradient_steps = [] 
 
-        checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
-        checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
+        checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000,]
+        checkpoint_steps.extend([1000 * i for i in range(2, (LAST_STEP // 1000) + 1)])
+        checkpoint_steps.extend([LAST_STEP])
 
         def get_gradient_step(step: int): 
             """
             Return a list of the gradient steps that are used at a given checkpoint step. 
             """
-            return list(range(max(0, step-5), min(step+6, 143_000))) 
+            return list(range(max(0, step-5), min(step+6, LAST_STEP))) 
 
         model_size = self.config.name.split("__")[0]
 

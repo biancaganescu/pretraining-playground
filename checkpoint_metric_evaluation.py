@@ -2,7 +2,7 @@
 Script to extract additional evaluation metrics from the Pythia model over the course of training.
 """
 
-__author__ = 'Richard Diehl Martinez'
+# __author__ = 'Richard Diehl Martinez'
 
 from datasets import load_dataset
 import torch
@@ -19,32 +19,38 @@ import shutil
 import multiprocessing
 
 # Initial constants
+DOWNLOAD_DATASET_PATH = "biancaganescu/training-data-per-batch"
+UPLOAD_DATASET_PATH = "biancaganescu/pythia-training-evals-40m-base"
+MODEL_PATH_1 = "../gpt-neox/hf-checkpoints-"
+MODEL_PATH_2 = "-base/step" 
+LAST_STEP = 4091
+ORIGINAL_BATCH_SIZE = 32 
+REDUCED_BATCH_SIZE = 32 
+model_sizes = ["40m"]
+
 
 checkpoint_dataset = load_dataset(
-    "rdiehlmartinez/pythia-pile-presampled",
-    "checkpoints",
+    DOWNLOAD_DATASET_PATH,
+    "default",
     split='train',
     num_proc=multiprocessing.cpu_count()
 )
 
-model_sizes = ["70m", "160m", "410m", "1b", "1.4b", "2.8b"]
-
 # checkpoint step stored by pythia 
 
 # checkpointing steps used in evaluation by pythia 
-checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, ]
-checkpoint_steps.extend([3000 + (i * 10000) for i in range(0, 15)])
+checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000]
+checkpoint_steps.extend([i * 1000 for i in range(2, (LAST_STEP // 1000) + 1)])
+checkpoint_steps.extend([LAST_STEP])
 
-ORIGINAL_BATCH_SIZE = 1024 
-REDUCED_BATCH_SIZE = 128 
 
-MAX_STEP = 142_999 # Last step in training (used to index final batc)
+MAX_STEP = LAST_STEP - 1 # Last step in training (used to index final batc)
 
 # NOTE: setting up the data batch sizes 
 
 ordered_steps = list(set(checkpoint_dataset['step']))
 ordered_steps.sort()
-step_to_start_index = {step: i*1024 for i, step in enumerate(ordered_steps)}
+step_to_start_index = {step: i*ORIGINAL_BATCH_SIZE for i, step in enumerate(ordered_steps)}
 
 def get_data_batch(step, include_labels=True):
     """
@@ -55,7 +61,7 @@ def get_data_batch(step, include_labels=True):
 
     assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
     start_idx = step_to_start_index[step]
-    end_idx = start_idx + 1024
+    end_idx = start_idx + ORIGINAL_BATCH_SIZE
 
     return {
         "input_ids": torch.tensor(checkpoint_dataset[start_idx:end_idx]['ids'], device='cuda'),
@@ -151,9 +157,7 @@ def load_model(model_size, checkpoint_step):
     Load the model at a given checkpoint step.
     """
     model = GPTNeoXForCausalLM.from_pretrained(
-        f"EleutherAI/pythia-{model_size}-deduped",
-        revision=f"step{checkpoint_step}",
-        cache_dir=f"./pythia-{model_size}-deduped/step{checkpoint_step}",
+        MODEL_PATH_1 + str(model_size) + MODEL_PATH_2 + str(checkpoint_step)
     ).to('cuda')
 
     return model
@@ -178,7 +182,7 @@ def main(model_size, delete_after):
         os.mkdir(model_folder)
 
     hf_api = HfApi()
-    _hf_files = hf_api.list_repo_files("rdiehlmartinez/pythia-training-evals", repo_type="dataset")
+    _hf_files = hf_api.list_repo_files(UPLOAD_DATASET_PATH, repo_type="dataset")
     hf_files = ["training_evals/"+file.replace("models/", "") for file in _hf_files]
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
@@ -208,7 +212,7 @@ def main(model_size, delete_after):
             hf_api.upload_folder(
                 folder_path=checkpoint_folder,
                 path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-                repo_id="rdiehlmartinez/pythia-training-evals",
+                repo_id=UPLOAD_DATASET_PATH,
                 repo_type="dataset",
             )
     

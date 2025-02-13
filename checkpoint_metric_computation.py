@@ -16,6 +16,15 @@ from scipy.linalg import svdvals
 
 cpu_count = os.cpu_count()
 
+# Initial constants
+DOWNLOAD_DATASET_PATH = "biancaganescu/pythia-training-metrics-40m-qk-layernorm"
+
+MODEL_PATH_1 = "../gpt-neox/hf-checkpoints-"
+MODEL_PATH_2 = "-qk-layernorm" 
+SAVE_PATH = "computed_statistics/40m-qk-layernorm/"
+
+model_sizes = ["40m"]
+
 checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 3000, 4000, 4091]
 # checkpoint_steps.extend([(i * 10000) for i in range(0, 15)])
 
@@ -32,7 +41,7 @@ def get_dataset(subconfig: str):
     while retry_count < 5:
         try: 
             dataset = load_dataset(
-                "biancaganescu/pythia-training-metrics", subconfig, split='default',
+                DOWNLOAD_DATASET_PATH, subconfig, split='default',
                 # cache_dir='/rds-d7/user/rd654/hpc-work/cache',
                 writer_batch_size=100,
             )
@@ -870,11 +879,11 @@ def main(model_size, metrics, use_mini_grads):
     gradient_dataset = None
 
     # save out the computed metrics to computed_satistics/model_size
-    os.makedirs(f"computed_statistics/{model_size}", exist_ok=True)
+    os.makedirs(SAVE_PATH + str(model_size), exist_ok=True)
 
-    model_config = AutoConfig.from_pretrained(f"../gpt-neox/hf-checkpoints-{model_size}")
+    model_config = AutoConfig.from_pretrained(MODEL_PATH_1 + str(model_size) + MODEL_PATH_2)
  
-    cka_scores_per_layer_fn = f"computed_statistics/{model_size}/cka_scores_per_layer.pkl"
+    cka_scores_per_layer_fn = SAVE_PATH + str(model_size) + "/cka_scores_per_layer.pkl"
     if not os.path.exists(cka_scores_per_layer_fn) and "cka" in metrics:
         if activation_dataset is None:
             activation_dataset = get_dataset(f"{model_size}__activations")
@@ -886,7 +895,7 @@ def main(model_size, metrics, use_mini_grads):
         with open(cka_scores_per_layer_fn, "wb") as f:
             pickle.dump(cka_scores_per_layer, f)
 
-    weight_magnitudes_per_layer_fn = f"computed_statistics/{model_size}/weight_magnitudes_per_layer.pkl"
+    weight_magnitudes_per_layer_fn = SAVE_PATH + str(model_size) + "/weight_magnitudes_per_layer.pkl"
     if not os.path.exists(weight_magnitudes_per_layer_fn) and "weight_magnitudes" in metrics:
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
@@ -895,7 +904,7 @@ def main(model_size, metrics, use_mini_grads):
         with open(weight_magnitudes_per_layer_fn, "wb") as f:
             pickle.dump(weight_magnitudes_per_layer, f)
 
-    grad_weight_magnitudes_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_magnitudes_per_layer.pkl"
+    grad_weight_magnitudes_per_layer_fn = SAVE_PATH + str(model_size) + "/grad_weight_magnitudes_per_layer.pkl"
     if not os.path.exists(grad_weight_magnitudes_per_layer_fn) and "grad_weight_magnitudes" in metrics:
         if gradient_dataset is None:
             gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))
@@ -907,7 +916,7 @@ def main(model_size, metrics, use_mini_grads):
         with open(grad_weight_magnitudes_per_layer_fn, "wb") as f:
             pickle.dump(grad_weight_magnitudes_per_layer, f)
 
-    grad_sim_per_layer_fn = f"computed_statistics/{model_size}/grad_sim_per_layer.pkl"
+    grad_sim_per_layer_fn = SAVE_PATH + str(model_size) + "/grad_sim_per_layer.pkl"
     if not os.path.exists(grad_sim_per_layer_fn) and "grad_sim" in metrics:
         if gradient_dataset is None:
             gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))
@@ -919,7 +928,7 @@ def main(model_size, metrics, use_mini_grads):
         with open(grad_sim_per_layer_fn, "wb") as f:
             pickle.dump(grad_sim_per_layer, f)
 
-    weight_svd_per_layer_fn = f"computed_statistics/{model_size}/weight_svd_per_layer.pkl"
+    weight_svd_per_layer_fn = SAVE_PATH + str(model_size) + "/weight_svd_per_layer.pkl"
     if not os.path.exists(weight_svd_per_layer_fn) and "weight_svd" in metrics:
         if weights_dataset is None:
             weights_dataset = get_dataset(f"{model_size}__weights")
@@ -928,7 +937,7 @@ def main(model_size, metrics, use_mini_grads):
         with open(weight_svd_per_layer_fn, "wb") as f:
             pickle.dump(svd_per_layer, f) 
 
-    grad_weight_svd_per_layer_fn = f"computed_statistics/{model_size}/grad_weight_svd_per_layer.pkl"
+    grad_weight_svd_per_layer_fn = SAVE_PATH + str(model_size) + "/grad_weight_svd_per_layer.pkl"
     if not os.path.exists(grad_weight_svd_per_layer_fn) and "grad_weight_svd" in metrics:
         if gradient_dataset is None:
             gradient_dataset = get_dataset(f"{model_size}__gradients" + ("_mini" if use_mini_grads else ""))

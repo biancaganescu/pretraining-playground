@@ -10,7 +10,7 @@ import pickle
 ALL_EVAL_METRICS = ['arc_challenge', 'arc_easy', 'lambada_openai', 'piqa', 'winogrande', 'wsc', 'sciq', 'logiqa',]
 LIMITED_EVAL_METRICS = ['arc_easy', 'lambada_openai', ] 
 
-MODEL_SIZES = ["14m"] 
+MODEL_SIZES = ["40m"] 
 METRICS = ['cka_scores', 'grad_sim', 'grad_weight_magnitudes', 'weight_magnitudes']
 
 CHECKPOINT_STEPS = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 3000, 4000, 4091]
@@ -66,7 +66,6 @@ def sort_and_filter_metrics(metrics, filter_layer_name="attention.dense", remove
     metrics = {key: val for key, val in sorted(metrics.items(), key=lambda x: int(x[0].split("layers.")[-1].split('.')[0]))}
     return metrics
 
-
 def basic_data_sanity_check():
     """
     Simple sanity checks to verify the integrity of computed_metrics
@@ -76,7 +75,7 @@ def basic_data_sanity_check():
             # we want to compute the average metric for each of the model sizes and plot out 
             # the average metric as a function of the number of training steps
             try: 
-                with open(f'/home/bmg44/pretraining-playground/computed_statistics/{model_size}/{metric_name}_per_layer.pkl', 'rb') as f:
+                with open(f'/home/bmg44/pretraining-playground/computed_statistics/40m_base/{model_size}/{metric_name}_per_layer.pkl', 'rb') as f:
                     _metrics = pickle.load(f)
                 
                 for key, value in _metrics.items(): 

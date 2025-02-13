@@ -23,34 +23,40 @@ import torch.nn.functional as F
 
 # Initial constants
 
+# Initial constants
+DOWNLOAD_DATASET_PATH = "biancaganescu/training-data-per-batch"
+UPLOAD_DATASET_PATH = "biancaganescu/pythia-training-metrics-40m-qk-layernorm"
+MODEL_PATH_1 = "../gpt-neox/hf-checkpoints-"
+MODEL_PATH_2 = "-qk-layernorm/step" 
+LAST_STEP = 4091
+ORIGINAL_BATCH_SIZE = 32 
+REDUCED_BATCH_SIZE = 32 
+model_sizes = ["40m"]
+
+# checkpointing steps used in evaluation by pythia 
+checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 3000, 4000, 4091]
+# checkpoint_steps.extend([(i * 10000) for i in range(0, 15)])
 checkpoint_dataset = load_dataset(
-    "biancaganescu/training-data-per-batch",
+    DOWNLOAD_DATASET_PATH,
     "default",
     split='train',
     num_proc=multiprocessing.cpu_count()
 )
 
-model_sizes = ["14m"]
 
-# checkpoint step stored by pythia 
-
-# checkpointing steps used in evaluation by pythia 
-checkpoint_steps = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1000, 2000, 3000, 4000, 4091]
-# checkpoint_steps.extend([(i * 10000) for i in range(0, 15)])
 
 # attention layers to analyze
 target_layers_suffix = ["attention.query_key_value", "attention.dense", "mlp.dense_4h_to_h"]
 
-ORIGINAL_BATCH_SIZE = 32 
-REDUCED_BATCH_SIZE = 32 
 
-MAX_STEP = 4090 # Last step in training (used to index final batc)
+
+MAX_STEP = LAST_STEP - 1 # Last step in training (used to index final batc)
 
 # NOTE: setting up the data batch sizes 
 
 ordered_steps = list(set(checkpoint_dataset['step']))
 ordered_steps.sort()
-step_to_start_index = {step: i*32 for i, step in enumerate(ordered_steps)}
+step_to_start_index = {step: i*ORIGINAL_BATCH_SIZE for i, step in enumerate(ordered_steps)}
 
 def get_data_batch(step):
     """
@@ -59,7 +65,7 @@ def get_data_batch(step):
 
     assert(step in step_to_start_index), f"Step {step} not valid checkpoint step."
     start_idx = step_to_start_index[step]
-    end_idx = start_idx + 32
+    end_idx = start_idx + ORIGINAL_BATCH_SIZE
 
     return {
         "input_ids": torch.tensor(checkpoint_dataset[start_idx:end_idx]['ids'], device='cuda'),
@@ -70,7 +76,7 @@ def get_gradient_batches(step: int):
     Return a generator of data batches for the valid gradient steps around the checkpoint step.
     """
     valid_gradient_steps = list(
-        range(max(0, step-5), min(step+6, 4091))
+        range(max(0, step-5), min(step+6, LAST_STEP))
     ) 
     return ((get_data_batch(step), step) for step in valid_gradient_steps)
 
@@ -284,7 +290,7 @@ def load_model(model_size, checkpoint_step):
     Load the model at a given checkpoint step.
     """
     model = GPTNeoXForCausalLM.from_pretrained(
-        f"../gpt-neox/hf-checkpoints-{model_size}/step{checkpoint_step}"
+        MODEL_PATH_1 + str(model_size) + MODEL_PATH_2 + str(checkpoint_step)
     ).to('cuda')
 
     return model
@@ -311,7 +317,7 @@ def main(model_size, delete_after):
         os.mkdir(model_folder)
 
     hf_api = HfApi()
-    _hf_files = hf_api.list_repo_files("biancaganescu/pythia-training-metrics", repo_type="dataset")
+    _hf_files = hf_api.list_repo_files(UPLOAD_DATASET_PATH, repo_type="dataset")
     hf_files = ["model_metrics/"+file.replace("models/", "") for file in _hf_files]
 
     for checkpoint_step in tqdm(checkpoint_steps, leave=False):
@@ -361,7 +367,7 @@ def main(model_size, delete_after):
             hf_api.upload_folder(
                 folder_path=checkpoint_folder,
                 path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-                repo_id="biancaganescu/pythia-training-metrics",
+                repo_id=UPLOAD_DATASET_PATH,
                 repo_type="dataset",
                 allow_patterns=["checkpoint_activations.pickle", "checkpoint_weights.pickle"]
             )
@@ -406,7 +412,7 @@ def main(model_size, delete_after):
         hf_api.upload_folder(
             folder_path=checkpoint_folder,
             path_in_repo=f"models/{model_size}/checkpoint_{checkpoint_step}",
-            repo_id="biancaganescu/pythia-training-metrics",
+            repo_id=UPLOAD_DATASET_PATH,
             repo_type="dataset",
             allow_patterns=[f"checkpoint_gradients_*"]
         )
